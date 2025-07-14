@@ -1,0 +1,32 @@
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+    compatible = "brcm,bcm2835";
+    fragment@0{
+        target-path = "/";
+        __overlay__{
+        #address-cells = <1>;
+	    #size-cells = <1>;
+	    ad7606-8@0 {
+                compatible = "adi,ad7606-8";
+                reg = <0x3F200034 0x00000003>;
+                avcc-supply = <&vdd_5v0_reg>;
+                interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
+                interrupt-parent = <&gpio>;
+                adi,conversion-start-gpios = <&gpio 5 GPIO_ACTIVE_HIGH>;
+                reset-gpios = <&gpio 6 GPIO_ACTIVE_HIGH>;
+                adi,first-data-gpios = <&gpio 7 GPIO_ACTIVE_HIGH>;
+                adi,oversampling-ratio-gpios = <&gpio 24 GPIO_ACTIVE_HIGH
+                                &gpio 25 GPIO_ACTIVE_HIGH
+                                &gpio 26 GPIO_ACTIVE_HIGH>;
+                standby-gpios = <&gpio 27 GPIO_ACTIVE_LOW>;
+                adi,sw-mode;
+                status = "okay";
+            };
+        };
+    };
+};
