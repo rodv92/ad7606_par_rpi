@@ -4,7 +4,7 @@
  *
  * Copyright 2011 Analog Devices Inc.
  *
- * Notic : Derivative Work
+ * Notice : Derivative Work
  *
  * Copyright 2025 SKYNEXT Rodrigo Verissimo EURL
  *
@@ -13,7 +13,7 @@
  * Integration of MMIO address space into reg property of the device tree
  * instead of board support code
  * Adding support for byte shifting to extract conversion results on GPIO BCM
- * pins 8 to 23 as parallel interface pins, while maintaining memory aligment constrains (4 byte alignment, 4 byte read i/o)
+ * BCM pins GPIO8 to GPIO23 as parallel interface pins, while maintaining memory aligment constrains (4 byte alignment, 4 byte read i/o)
  * 
  * Tested on Raspberry Pi Zero W 1.1
  * Added debug logging
@@ -675,21 +675,82 @@ static int ad7606_par8_read_block(struct device *dev,
 	 * cause an extra read or clock cycle.  Monitoring the frstdata signal
 	 * allows to recover from such failure situations.
 	 */
-	int num = count;
+	int num = count; // total number of channels to read.
 	u16 *_buf = buf;
+	u32 val;
+	u8 lsb, msb;
+	u16 delay_ns = 200;
 
-	if (st->gpio_frstdata) {
-		insb((unsigned long)st->base_address, _buf, 2);
-		if (!gpiod_get_value(st->gpio_frstdata)) {
-			ad7606_reset(st);
-			return -EIO;
+	/*
+	 * CS/RD strobe, assuming single AD7606 on the bus and 8 channel simultaneous sampling, not in 2 groups of 4 channels
+	 * TODO : check that count is less or equal than the number of channels supported by the device (id->driver_data matching the dt device)
+	 *
+	 */
+
+	gpiod_set_value(st->gpio_cs_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+		// add proper timing constraints. test : sleep based and delay functions
+		// https://stackoverflow.com/questions/15994603/how-to-sleep-in-the-linux-kernel
+	
+	ndelay(delay_ns);
+	
+	// strobe cycle 0.4us, total read time for all channels = 0.4us * 2 * 8 reads, 12.8us, which gives max sampling rate of 156.250 ksps per channel
+	// not accounting preamble delays (convst signal )
+	// management, etc. so probably 100 ksps being conservative.
+	// higher sampling rates should implement shorter RPI to ADC ribbons, and shielding or twisted pair, and/or a guard grounded conductor 
+	// on one side between the ADC and each pin of the parallel interface.
+
+	// coded for mode with 8 bit lsb read, first the 8 bit msb read next.
+	// that means DB14/HBEN pin of the ADC7606 SHALL be tied to GND
+	// TODO : code the opposite mode, or hardcode and don't to make the code a little faster, with less configuration
+	// overhead.
+
+	// TODO : performance testing writing directly to mmio set value register for the CS/RD strobe pin
+	// instead of gpiod_set_value()
+
+	bool first_channel = true;
+
+	while(num>0)
+	{
+		if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
+		{
+			first_channel = false; 
+
+			//insb((unsigned long)st->base_address, _buf, 2);
+
+			val = ioread32(st->base_address);
+			lsb = (val >> 8) & 0xFF; // extract 8 bits (lsb)
+			gpiod_set_value(st->gpio_cs_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			ndelay(delay_ns);
+			gpiod_set_value(st->gpio_cs_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+			ndelay(delay_ns);
+
+			val = ioread32(st->base_address);
+			msb = (val >> 8) & 0xFF; // extract 8 bits (msb)
+			gpiod_set_value(st->gpio_cs_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			ndelay(delay_ns);
+			gpiod_set_value(st->gpio_cs_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+			ndelay(delay_ns);
+			// at this point frstdata should be low (after falling edge of CS/RD above, per datasheet)		
+
+			*_buf = ((u16) msb << 8) | lsb; // combine into 16 bit channel sample value
+			_buf++;
+			num--;
 		}
-		_buf++;
-		num--;
-	}
-	insb((unsigned long)st->base_address, _buf, num * 2);
+		else
+		{
+			gpiod_set_value(st->gpio_cs_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			ndelay(delay_ns);		
+			ad7606_reset(st);
+			// IO error, the IC signals first channel conversion although it's not, or doesn't signal first channel
+			// conversion although it should be.
+			return -EIO;
 
-	return 0;
+		}
+
+	}
+	gpiod_set_value(st->gpio_cs_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+	delayns(delay_ns)
+	
 }
 
 static const struct ad7606_bus_ops ad7606_par8_bops = {
