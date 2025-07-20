@@ -268,6 +268,13 @@ static int ad7606_request_gpios(struct ad7606_state *st)
 	if (IS_ERR(st->gpio_frstdata))
 		return PTR_ERR(st->gpio_frstdata);
 
+	st->gpio_csrd = devm_gpiod_get_optional(dev, "csrd",
+			GPIOD_OUT_LOW);
+	if (IS_ERR(st->gpio_csrd))
+		return PTR_ERR(st->gpio_csrd);
+
+
+
 	if (!st->chip_info->oversampling_num)
 		return 0;
 
@@ -331,6 +338,10 @@ static int ad7606_read_samples(struct ad7606_state *st)
 {
 	unsigned int num = st->chip_info->num_channels - 1;
 	u16 *data = st->data;
+
+	// TODO : implement channel subset read of channels 0 to n -1;
+	// with n <= num_channels
+	// effectively disabling the higher index channels, but potentially increasing effective sample rate
 
 	return st->bops->read_block(st->dev, num, data);
 }
@@ -641,9 +652,59 @@ static int ad7606_par16_read_block(struct device *dev,
 	 * cause an extra read or clock cycle.  Monitoring the frstdata signal
 	 * allows to recover from such failure situations.
 	 */
-	int num = count;
-	u16 *_buf = buf;
 
+
+	int num = count; // total number of channels to read.
+	u16 *_buf = buf;
+	u32 val;
+	u16 delay_ns = 200;
+
+
+
+	/*
+	* CS/RD strobe, assuming single AD7606 on the bus and 8 channel simultaneous sampling, not in 2 groups of 4 channels
+	* TODO : check that count is less or equal than the number of channels supported by the device (id->driver_data matching the dt device)
+	*
+	*/
+
+	gpiod_set_value(st->gpio_csrd,0); // TODO : check that line propery is default (active high) in gpio setup
+		// add proper timing constraints. test : sleep based and delay functions
+		// https://stackoverflow.com/questions/15994603/how-to-sleep-in-the-linux-kernel
+	
+	ndelay(delay_ns);
+
+	bool first_channel = true;
+
+	while(num>0)
+	{
+		if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
+		{
+			first_channel = false; 
+
+			//insb((unsigned long)st->base_address, _buf, 2);
+
+			val = ioread32(st->base_address);
+			*_buf = (u16) ((val >> 8) & 0xFFFF); // extract 16 bits
+			_buf++;
+			num--;
+		}
+		else
+		{
+			gpiod_set_value(st->gpio_csrd,1); // TODO : check that line propery is default (active high) in gpio setup
+			ndelay(delay_ns);		
+			ad7606_reset(st);
+			// IO error, the IC signals first channel conversion although it's not, or doesn't signal first channel
+			// conversion although it should be.
+			return -EIO;
+
+		}
+
+	}
+	gpiod_set_value(st->gpio_csrd,1); // TODO : check that line propery is default (active high) in gpio setup
+	ndelay(delay_ns);
+	return 0;
+
+/*
 	if (st->gpio_frstdata) {
 		insw((unsigned long)st->base_address, _buf, 1);
 		if (!gpiod_get_value(st->gpio_frstdata)) {
@@ -655,6 +716,8 @@ static int ad7606_par16_read_block(struct device *dev,
 	}
 	insw((unsigned long)st->base_address, _buf, num);
 	return 0;
+*/
+
 }
 
 static const struct ad7606_bus_ops ad7606_par16_bops = {
@@ -681,13 +744,15 @@ static int ad7606_par8_read_block(struct device *dev,
 	u8 lsb, msb;
 	u16 delay_ns = 200;
 
+
+
 	/*
 	 * CS/RD strobe, assuming single AD7606 on the bus and 8 channel simultaneous sampling, not in 2 groups of 4 channels
 	 * TODO : check that count is less or equal than the number of channels supported by the device (id->driver_data matching the dt device)
 	 *
 	 */
 
-	gpiod_set_value(st->gpio_cs_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+	gpiod_set_value(st->gpio_csrd,0); // TODO : check that line propery is default (active high) in gpio setup
 		// add proper timing constraints. test : sleep based and delay functions
 		// https://stackoverflow.com/questions/15994603/how-to-sleep-in-the-linux-kernel
 	
@@ -719,16 +784,16 @@ static int ad7606_par8_read_block(struct device *dev,
 
 			val = ioread32(st->base_address);
 			lsb = (val >> 8) & 0xFF; // extract 8 bits (lsb)
-			gpiod_set_value(st->gpio_cs_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			gpiod_set_value(st->gpio_csrd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
-			gpiod_set_value(st->gpio_cs_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+			gpiod_set_value(st->gpio_csrd,0); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
 
 			val = ioread32(st->base_address);
 			msb = (val >> 8) & 0xFF; // extract 8 bits (msb)
-			gpiod_set_value(st->gpio_cs_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			gpiod_set_value(st->gpio_csrd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
-			gpiod_set_value(st->gpio_cs_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+			gpiod_set_value(st->gpio_csrd,0); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
 			// at this point frstdata should be low (after falling edge of CS/RD above, per datasheet)		
 
@@ -738,7 +803,7 @@ static int ad7606_par8_read_block(struct device *dev,
 		}
 		else
 		{
-			gpiod_set_value(st->gpio_cs_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			gpiod_set_value(st->gpio_csrd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);		
 			ad7606_reset(st);
 			// IO error, the IC signals first channel conversion although it's not, or doesn't signal first channel
@@ -748,8 +813,8 @@ static int ad7606_par8_read_block(struct device *dev,
 		}
 
 	}
-	gpiod_set_value(st->gpio_cs_rd,1); // TODO : check that line propery is default (active high) in gpio setup
-	delayns(delay_ns)
+	gpiod_set_value(st->gpio_csrd,1); // TODO : check that line propery is default (active high) in gpio setup
+	ndelay(delay_ns);
 	
 }
 
