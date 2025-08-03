@@ -109,7 +109,9 @@ struct ad7606_state {
 	struct gpio_desc		*gpio_range;
 	struct gpio_desc		*gpio_standby;
 	struct gpio_desc		*gpio_frstdata;
-	struct gpio_desc		*gpio_csrd; /* cs/rd, single ad7606 on bus gpio cs/rd strobe pin for successive channel read*/
+	struct gpio_desc		*gpio_cs; /* chip select line */
+	struct gpio_desc		*gpio_rd; /* rd line */
+	
 	struct gpio_descs		*gpio_os;
 	struct iio_trigger		*trig;
 	struct completion		completion;

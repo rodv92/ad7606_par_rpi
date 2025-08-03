@@ -15,12 +15,13 @@
                 compatible = "adi,ad7606-8";
                 reg = <0x3F200034 0x00000004>;
                 avcc-supply = <&vdd_5v0_reg>;
-                interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
+                interrupts = <4 IRQ_TYPE_EDGE_FALLING>; /* linked to AD7606 busy line ? */
                 interrupt-parent = <&gpio>;
                 adi,conversion-start-gpios = <&gpio 5 GPIO_ACTIVE_HIGH>;
                 reset-gpios = <&gpio 6 GPIO_ACTIVE_HIGH>;
                 adi,first-data-gpios = <&gpio 7 GPIO_ACTIVE_HIGH>;
-                csrd-gpios = <&gpio 3 GPIO_ACTIVE_HIGH>;
+                cs-gpios = <&gpio 2 GPIO_ACTIVE_HIGH>;
+                rd-gpios = <&gpio 3 GPIO_ACTIVE_HIGH>;
                 adi,oversampling-ratio-gpios = <&gpio 24 GPIO_ACTIVE_HIGH
                                 &gpio 25 GPIO_ACTIVE_HIGH
                                 &gpio 26 GPIO_ACTIVE_HIGH>;
