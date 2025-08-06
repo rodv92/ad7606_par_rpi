@@ -64,6 +64,7 @@
 #include "ad7606.h"
 #include "ad7606_bus_iface.h"
 
+#define GPIOGET 13
 
 
 /*
@@ -283,10 +284,21 @@ static int ad7606_request_gpios(struct ad7606_state *st)
 	if (!st->chip_info->oversampling_num)
 		return 0;
 
+	st->gpio_parallel_data = devm_gpiod_get_array(dev,
+			"adi,parallel-data",
+			GPIOD_IN);
+	if(IS_ERR(st->gpio_parallel_data))
+		return PTR_ERR(st->gpio_parallel_data);
+
+
 	st->gpio_os = devm_gpiod_get_array_optional(dev,
 						    "adi,oversampling-ratio",
 						    GPIOD_OUT_LOW);
 	return PTR_ERR_OR_ZERO(st->gpio_os);
+
+	
+
+
 }
 
 /*
@@ -598,6 +610,9 @@ static struct platform_device *board_devices[] __initdata = {
 
 
 struct platform_device *_pdev;
+u32 __iomem *addr;
+unsigned long phy_addr;
+
 
 
 int ad7606_reset(struct ad7606_state *st)
@@ -646,7 +661,7 @@ static int ad7606_par16_read_block(struct device *dev,
 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
 	struct ad7606_state *st = iio_priv(indio_dev);
 
-
+	dev_dbg(dev,"ad7606:entered ad7606_par16_read_block()\n");
 	/*
 	 * On the parallel interface, the frstdata signal is set to high while
 	 * and after reading the sample of the first channel and low for all
@@ -691,13 +706,21 @@ static int ad7606_par16_read_block(struct device *dev,
 
 			//insb((unsigned long)st->base_address, _buf, 2);
 
-			val = ioread32(st->base_address);
+			val = readl(st->base_address);
+			dev_dbg(dev,"ad7606:channel read. num=%u\n",num);
+			dev_dbg(dev,"ad7606:channel read. raw base_address val=%u\n",val);
+			
+
 			*_buf = (u16) ((val >> 8) & 0xFFFF); // extract 16 bits
+			dev_dbg(dev,"ad7606:channel read. 16 bit shift/mask val=%hu\n",*_buf);
+
 			_buf++;
 			num--;
 		}
 		else
 		{
+			dev_dbg(dev,"ad7606:channel read. IO error, frstdata level not expected\n");
+			
 			gpiod_set_value(st->gpio_cs,1); // putting back cs to active high due to IO error
 			gpiod_set_value(st->gpio_rd,1); // putting back rd to active high due to IO error
  
@@ -722,6 +745,8 @@ static int ad7606_par16_read_block(struct device *dev,
 
 	// TODO : check that line propery is default (active high) in gpio setup
 	ndelay(delay_ns);
+	dev_dbg(dev,"ad7606:all channels read. exiting callback\n");
+		
 	return 0;
 
 /*
@@ -802,14 +827,14 @@ static int ad7606_par8_read_block(struct device *dev,
 
 			//insb((unsigned long)st->base_address, _buf, 2);
 
-			val = ioread32(st->base_address);
+			val = readl(st->base_address);
 			lsb = (val >> 8) & 0xFF; // extract 8 bits (lsb)
 			gpiod_set_value(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
 			gpiod_set_value(st->gpio_rd,0); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
 
-			val = ioread32(st->base_address);
+			val = readl(st->base_address);
 			msb = (val >> 8) & 0xFF; // extract 8 bits (msb)
 			gpiod_set_value(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
@@ -986,8 +1011,6 @@ return devm_iio_device_register(dev, indio_dev);
 }
 */
 
-#define GPIOGET   0x34
-#define GPIO_GET() readl((addr + GPIOGET)) // get the value of the pin.
 
 
 int ad7606_probe(struct platform_device *pdev)
@@ -1005,49 +1028,11 @@ int ad7606_probe(struct platform_device *pdev)
 	}
 
 	struct resource *res;
-	void __iomem *addr;
 	resource_size_t remap_size;
 
 	int ret;
 	int irq;
 	
-	/*
-	int gpio;
-
-	gpio = ad7606_resources[1].start;
-
-	dev_dbg(&pdev->dev,"irq from ad7606_resources[1].start ok = %i\n",gpio);
-
-	const char gpio_busy_label[] = "ad7606_busy";
-
-	ret = gpio_request(gpio, gpio_busy_label);
-	if (IS_ERR_VALUE(ret))
-	{
-		dev_dbg(&pdev->dev, "gpio_request() failed = %i\n",ret);
-		return ret;
-	}
-
-	dev_dbg(&pdev->dev, "gpio_request() ok = %i\n",ret);
-	
-	ret = gpio_direction_input(gpio);
-
-	if (IS_ERR_VALUE(ret))
-	{
-		dev_dbg(&pdev->dev,"gpio_direction_input() failed = %i\n",ret);
-		return ret;
-	}
-
-	dev_dbg(&pdev->dev,"gpio_direction_input() ok = %i\n",ret);
-
-	irq = gpio_to_irq(gpio);
-
-	if (IS_ERR_VALUE(irq))
-	{
-		dev_dbg(&pdev->dev, "gpio_to_irq() failed = %i\n",irq);
-		return irq;
-	}
-	*/
-
 	irq = platform_get_irq(pdev, 0);
 	if (IS_ERR_VALUE(irq))
 	{
@@ -1059,8 +1044,9 @@ int ad7606_probe(struct platform_device *pdev)
 
 	//addr = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 
-	unsigned long phy_addr;
+	
 	struct resource *res2;
+	
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	phy_addr = res->start;
@@ -1068,7 +1054,7 @@ int ad7606_probe(struct platform_device *pdev)
 	dev_dbg(&pdev->dev,"platform_get_resource() ok, start_addr = %lu\n",phy_addr);
 	dev_dbg(&pdev->dev,"will request mem region(), for device name = %s\n",dev_name(&pdev->dev));
 	
-    res2 = request_mem_region(phy_addr, 4, dev_name(&pdev->dev));
+    res2 = request_mem_region(phy_addr, SZ_4K, dev_name(&pdev->dev));
     // check for errors
 
 	if (IS_ERR(res2))
@@ -1076,13 +1062,21 @@ int ad7606_probe(struct platform_device *pdev)
 
 	dev_dbg(&pdev->dev,"request mem region ok()\n");
 
-        addr = ioremap(phy_addr, 4);
+        addr = ioremap(phy_addr, SZ_4K);
 
 	if (IS_ERR(addr))
 		return PTR_ERR(addr);
 
+	dev_dbg(&pdev->dev,"ioremap() ok, ptr base is = %px\n",addr);
+	
+	u32 offset = 13;
+	u32 __iomem * offset_addr = (u32 __iomem *) addr + offset;
+	
+
 	//unsigned long remapped_addr = *((unsigned long *) addr);
-	dev_dbg(&pdev->dev,"ioremap() ok, ptr is = %p\n",addr);
+	dev_dbg(&pdev->dev,"ioremap() ok, ptr base for GPIO is = %px\n",addr);
+	
+	dev_dbg(&pdev->dev,"ioremap() ok, ptr base for GPIO get level is = %px\n",offset_addr);
 	//dev_dbg(&pdev->dev,"ioremap() ok, addr is = %lu\n",remapped_addr);
 
 	/*
@@ -1096,10 +1090,6 @@ int ad7606_probe(struct platform_device *pdev)
 	remap_size = resource_size(res);
 
 	dev_dbg(&pdev->dev,"resource_size() ok, remap_size = %i\n",(int) remap_size);
-
-	u32 testval = GPIO_GET();
-
-	dev_dbg(&pdev->dev,"readl() test val = %u\n",testval);
 
 	dev_dbg(&pdev->dev,"ad7606:entered ad7606_probe()\n");
 
@@ -1120,7 +1110,7 @@ int ad7606_probe(struct platform_device *pdev)
 	st->dev = &pdev->dev;
 	mutex_init(&st->lock);
 	st->bops = &ad7606_par16_bops;
-	st->base_address = addr;
+	st->base_address = offset_addr;
 	/* tied to logic low, analog input range is +/- 5V */
 	st->range[0] = 0;
 	st->oversampling = 1;
@@ -1244,12 +1234,20 @@ int ad7606_probe(struct platform_device *pdev)
 	
 	
 	dev_dbg(&pdev->dev,"ad7606:devm_iio_triggered_buffer_setup() ok\n");
+
+
+	//u32 __iomem * addr_test = (u32 __iomem *) offset_addr;
 	
+	for(u16 i = 0;i<256;i++)
+	{ 
+		u32 testval = readl(addr);
+		dev_dbg(&pdev->dev,"readl() on GPIO memory map test : ptr = %px\n",addr);
+		dev_dbg(&pdev->dev,"readl() on GPIO memory map test : val = %u\n",testval);
+		addr = (u32 __iomem *) addr + 1;
+	}
+
 	return devm_iio_device_register(&pdev->dev, indio_dev);
-			
-	
-	dev_dbg(&pdev->dev,"inline call ad7606_par_probe() ok \n");
-	return ret;
+		
 
 }
 
@@ -1299,11 +1297,20 @@ static int __init board_init(void)
 static void board_unload(void)
 {
     printk(KERN_INFO "ad7606_par module unload.");
+	//struct iio_dev *indio_dev = dev_get_drvdata(&_pdev->dev);
+	//devm_iio_device_unregister(&_pdev->dev, indio_dev);
+	//printk(KERN_INFO "devm_iio_device_unregister() called.");
 	
-	platform_device_unregister(_pdev);
-	printk(KERN_INFO "platform_device_unregister() called.");
+	//devm_iio_device_free(indio_dev);
+	//printk(KERN_INFO "devm_iio_device_free() called.");
+	
+	//platform_device_unregister(_pdev);
+	//printk(KERN_INFO "platform_device_unregister() called.");
 	platform_driver_unregister(&ad7606_driver);
 	printk(KERN_INFO "platform_driver_unregister() called.");
+	iounmap(addr);
+	release_mem_region(phy_addr,SZ_4K);
+	printk(KERN_INFO "module unloaded sucessfully.");
 	
 }
 

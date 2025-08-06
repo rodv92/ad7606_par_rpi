@@ -13,7 +13,7 @@
 	    #size-cells = <1>;
 	    ad7606-8@0 {
                 compatible = "adi,ad7606-8";
-                reg = <0x3F200034 0x00000004>;
+                reg = <0x20200000 0x00004096>;
                 avcc-supply = <&vdd_5v0_reg>;
                 interrupts = <4 IRQ_TYPE_EDGE_FALLING>; /* linked to AD7606 busy line ? */
                 interrupt-parent = <&gpio>;
@@ -26,6 +26,24 @@
                                 &gpio 25 GPIO_ACTIVE_HIGH
                                 &gpio 26 GPIO_ACTIVE_HIGH>;
                 standby-gpios = <&gpio 27 GPIO_ACTIVE_LOW>;
+                adi,parallel-data-gpios = <
+                &gpio 8 GPIO_ACTIVE_HIGH
+                &gpio 9 GPIO_ACTIVE_HIGH
+                &gpio 10 GPIO_ACTIVE_HIGH
+                &gpio 11 GPIO_ACTIVE_HIGH
+                &gpio 12 GPIO_ACTIVE_HIGH
+                &gpio 13 GPIO_ACTIVE_HIGH
+                &gpio 14 GPIO_ACTIVE_HIGH
+                &gpio 15 GPIO_ACTIVE_HIGH
+                &gpio 16 GPIO_ACTIVE_HIGH
+                &gpio 17 GPIO_ACTIVE_HIGH
+                &gpio 18 GPIO_ACTIVE_HIGH
+                &gpio 19 GPIO_ACTIVE_HIGH
+                &gpio 20 GPIO_ACTIVE_HIGH
+                &gpio 21 GPIO_ACTIVE_HIGH
+                &gpio 22 GPIO_ACTIVE_HIGH
+                &gpio 23 GPIO_ACTIVE_HIGH
+                >;
                 adi,sw-mode;
                 status = "okay";
             };
