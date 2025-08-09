@@ -1,5 +1,5 @@
 obj-m +=ad7606_par.o
-CFLAGS_ad7606_par.o := -DDEBUG
+CFLAGS_ad7606_par.o := -UDEBUG
 
 all: module dt
 	echo Built Device Tree Overlay and kernel module
@@ -12,5 +12,5 @@ dt: ad7606.dts
 	dtc -@ -Hepapr -I dts -O dtb -o ad7606.dtbo ad7606.dts.preprocessed
 
 clean: 
-	make -c /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 	rm -rf ad7606.dtbo

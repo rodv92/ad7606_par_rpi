@@ -113,6 +113,8 @@ struct ad7606_state {
 	struct gpio_desc		*gpio_rd; /* rd line */
 	
 	struct gpio_descs		*gpio_os;
+	struct gpio_descs		*gpio_parallel_data; /* for now, 16 line parallel data lines*/
+	
 	struct iio_trigger		*trig;
 	struct completion		completion;
 
@@ -154,6 +156,7 @@ struct ad7606_bus_ops {
 //		 const char *name, unsigned int id,
 //		 const struct ad7606_bus_ops *bops);
 int ad7606_probe(struct platform_device *pdev);
+void ad7606_remove(struct platform_device *pdev);
 
 
 int ad7606_reset(struct ad7606_state *st);

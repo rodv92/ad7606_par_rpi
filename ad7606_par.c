@@ -26,9 +26,13 @@
 #include <linux/sizes.h>
 
 #include <linux/io.h>
+#include <linux/ioport.h>
+
 
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/of_device.h>
+
 #include <linux/err.h>
 #include <linux/interrupt.h>
 
@@ -325,12 +329,19 @@ static irqreturn_t ad7606_interrupt(int irq, void *dev_id)
 static int ad7606_validate_trigger(struct iio_dev *indio_dev,
 				   struct iio_trigger *trig)
 {
-	struct ad7606_state *st = iio_priv(indio_dev);
+	//struct ad7606_state *st = iio_priv(indio_dev);
 
-	if (st->trig != trig)
-		return -EINVAL;
+	//if (st->trig != trig)
+	//	return -EINVAL;
 
-	return 0;
+	//return 0;
+	int ret;
+	printk(KERN_INFO "ad7606:validating trigger:%s\n",trig->name);
+	ret = strcmp(trig->name,"hrtimer0");
+	printk(KERN_INFO "ad7606:validating trigger:%u\n",ret);
+
+	return !(ret == 0);// DEBUGGING external trigger setup
+	
 }
 
 static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
@@ -609,7 +620,7 @@ static struct platform_device *board_devices[] __initdata = {
 */
 
 
-struct platform_device *_pdev;
+//struct platform_device *_pdev;
 u32 __iomem *addr;
 unsigned long phy_addr;
 
@@ -1011,19 +1022,62 @@ return devm_iio_device_register(dev, indio_dev);
 }
 */
 
+EXPORT_SYMBOL_NS_GPL(ad7606_probe, IIO_AD7606);
 
+
+static const struct platform_device_id ad7606_driver_ids[] = {
+	{ .name	= "ad7605-4", .driver_data = ID_AD7605_4, },
+	{ .name	= "ad7606-4", .driver_data = ID_AD7606_4, },
+	{ .name	= "ad7606-6", .driver_data = ID_AD7606_6, },
+	{ .name	= "ad7606-8", .driver_data = ID_AD7606_8, },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, ad7606_driver_ids);
+
+static const struct of_device_id ad7606_of_match[] = {
+	{ .compatible = "adi,ad7605-4", .data = (void *) &ad7606_driver_ids[0] },
+	{ .compatible = "adi,ad7606-4", .data = (void *) &ad7606_driver_ids[1] },
+	{ .compatible = "adi,ad7606-6", .data = (void *) &ad7606_driver_ids[2] },
+	{ .compatible = "adi,ad7606-8", .data = (void *) &ad7606_driver_ids[3] },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, ad7606_of_match);
+
+
+
+static struct platform_driver ad7606_driver = {
+	.probe = ad7606_probe,
+	.remove = ad7606_remove,
+	.id_table = ad7606_driver_ids,
+	.driver = {
+		.name = "ad7606",
+		.pm = AD7606_PM_OPS,
+		.of_match_table = ad7606_of_match,
+	},
+};
+
+void ad7606_remove(struct platform_device *pdev)
+{
+	//struct iio_dev *indio_dev = dev_get_drvdata(pdev->dev);
+	////struct iio_dev *indio_dev = dev_to_iio_dev(pdev->dev);
+	//struct ad7606_state *st = iio_priv(indio_dev);
+
+
+}
 
 int ad7606_probe(struct platform_device *pdev)
 {
 	
 
-	_pdev = pdev;
+	//_pdev = pdev;
 	dev_dbg(&pdev->dev,"ad7606:entered ad7606_par_probe\n");
-	const struct platform_device_id *id = platform_get_device_id(pdev);
-
+	//const struct platform_device_id *id = platform_get_device_id(pdev);
+	const struct of_device_id *of_id = of_match_device(ad7606_of_match,&pdev->dev);
+	const struct platform_device_id *id = of_id ? of_id->data: NULL;
+	
 	if (IS_ERR(id))
 	{
-		dev_dbg(&pdev->dev,"platform_get_device_id() failed !\n");
+		dev_dbg(&pdev->dev,"of_match_device() failed !\n");
 		return PTR_ERR(id);
 	}
 
@@ -1054,7 +1108,7 @@ int ad7606_probe(struct platform_device *pdev)
 	dev_dbg(&pdev->dev,"platform_get_resource() ok, start_addr = %lu\n",phy_addr);
 	dev_dbg(&pdev->dev,"will request mem region(), for device name = %s\n",dev_name(&pdev->dev));
 	
-    res2 = request_mem_region(phy_addr, SZ_4K, dev_name(&pdev->dev));
+    res2 = devm_request_mem_region(&pdev->dev, phy_addr, SZ_4K, dev_name(&pdev->dev));
     // check for errors
 
 	if (IS_ERR(res2))
@@ -1062,7 +1116,7 @@ int ad7606_probe(struct platform_device *pdev)
 
 	dev_dbg(&pdev->dev,"request mem region ok()\n");
 
-        addr = ioremap(phy_addr, SZ_4K);
+        addr = devm_ioremap(&pdev->dev,phy_addr, SZ_4K);
 
 	if (IS_ERR(addr))
 		return PTR_ERR(addr);
@@ -1123,12 +1177,13 @@ int ad7606_probe(struct platform_device *pdev)
 					"Failed to enable specified AVcc supply\n");
 	
 	dev_dbg(&pdev->dev,"ad7606:devm_regulator_get_enable() ok\n");
-	dev_dbg(&pdev->dev,"chip_id is hardcoded = ID_AD7606_8 \n");
+	dev_dbg(&pdev->dev,"chip_id is = %s\n",id->name);
 	
 	//BUG : the id->driver_data pointer has an issue, seems unable to fetch from the dts, or a struct/pointer nesting issue.
 	// WORKAROUND : hardcode id driver_data to 1 = ID_AD7606_8
-	//st->chip_info = &ad7606_chip_info_tbl[id->driver_data];
-	st->chip_info = &ad7606_chip_info_tbl[ID_AD7606_8];
+	st->chip_info = &ad7606_chip_info_tbl[id->driver_data];
+
+	//st->chip_info = &ad7606_chip_info_tbl[ID_AD7606_8];
 
 
 	dev_dbg(&pdev->dev,"ad7606:state chip info set() ok\n");
@@ -1158,7 +1213,11 @@ int ad7606_probe(struct platform_device *pdev)
 		else
 			indio_dev->info = &ad7606_info_no_os_or_range;
 	}
-	indio_dev->modes = INDIO_DIRECT_MODE;
+	//indio_dev->modes = INDIO_DIRECT_MODE; - no trigger support
+	indio_dev->modes = INDIO_BUFFER_TRIGGERED; //- modern trigger support, TODO : update to modern iio calls to use it. 
+	//indio_dev->modes = INDIO_RING_TRIGGERED; // legacy trigger support .
+	
+
 	indio_dev->name = id->name;
 	indio_dev->channels = st->chip_info->channels;
 	indio_dev->num_channels = st->chip_info->num_channels;
@@ -1198,7 +1257,10 @@ int ad7606_probe(struct platform_device *pdev)
 		if (ret < 0)
 			return ret;
 	}
-	
+
+
+
+	/*
 	st->trig = devm_iio_trigger_alloc(&pdev->dev, "%s-dev%d",
 						indio_dev->name,
 						iio_device_id(indio_dev));
@@ -1214,7 +1276,8 @@ int ad7606_probe(struct platform_device *pdev)
 		return ret;
 	
 	indio_dev->trig = iio_trigger_get(st->trig);
-	
+	*/
+
 	ret = devm_request_threaded_irq(&pdev->dev, irq,
 					NULL,
 					&ad7606_interrupt,
@@ -1251,36 +1314,6 @@ int ad7606_probe(struct platform_device *pdev)
 
 }
 
-EXPORT_SYMBOL_NS_GPL(ad7606_probe, IIO_AD7606);
-
-static const struct platform_device_id ad7606_driver_ids[] = {
-	{ .name	= "ad7605-4", .driver_data = ID_AD7605_4, },
-	{ .name	= "ad7606-4", .driver_data = ID_AD7606_4, },
-	{ .name	= "ad7606-6", .driver_data = ID_AD7606_6, },
-	{ .name	= "ad7606-8", .driver_data = ID_AD7606_8, },
-	{ }
-};
-MODULE_DEVICE_TABLE(platform, ad7606_driver_ids);
-
-static const struct of_device_id ad7606_of_match[] = {
-	{ .compatible = "adi,ad7605-4" },
-	{ .compatible = "adi,ad7606-4" },
-	{ .compatible = "adi,ad7606-6" },
-	{ .compatible = "adi,ad7606-8" },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, ad7606_of_match);
-
-static struct platform_driver ad7606_driver = {
-	.probe = ad7606_probe,
-	.id_table = ad7606_driver_ids,
-	.driver = {
-		.name = "ad7606",
-		.pm = AD7606_PM_OPS,
-		.of_match_table = ad7606_of_match,
-	},
-};
-
 static int __init board_init(void)
 {
     printk(KERN_INFO "ad7606_par module init.");
@@ -1306,10 +1339,12 @@ static void board_unload(void)
 	
 	//platform_device_unregister(_pdev);
 	//printk(KERN_INFO "platform_device_unregister() called.");
+
+
 	platform_driver_unregister(&ad7606_driver);
 	printk(KERN_INFO "platform_driver_unregister() called.");
-	iounmap(addr);
-	release_mem_region(phy_addr,SZ_4K);
+	//iounmap(addr);
+	//release_mem_region(phy_addr,SZ_4K);
 	printk(KERN_INFO "module unloaded sucessfully.");
 	
 }
