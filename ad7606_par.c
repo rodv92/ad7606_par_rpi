@@ -20,6 +20,7 @@
  *
  */
 //#define DEBUG
+#define TIMINGDELAY 20000
 
 #include <linux/types.h>
 #include <linux/property.h>
@@ -313,15 +314,27 @@ static int ad7606_request_gpios(struct ad7606_state *st)
  */
 static irqreturn_t ad7606_interrupt(int irq, void *dev_id)
 {
+	pr_debug("ad7606:enter ad7606_interrupt\n");
+	
 	struct iio_dev *indio_dev = dev_id;
+	pr_debug("ad7606:get indio_dev\n");
+	
 	struct ad7606_state *st = iio_priv(indio_dev);
+	pr_debug("ad7606:get state\n");
+
+
 
 	if (iio_buffer_enabled(indio_dev)) {
 		gpiod_set_value(st->gpio_convst, 0);
+		ndelay(TIMINGDELAY);
+		pr_debug("ad7606:set convst 0\n");
 		iio_trigger_poll_nested(st->trig);
+		pr_debug("ad7606:trigger_poll_nested\n");
+
 	} else {
 		complete(&st->completion);
 	}
+	pr_debug("ad7606:return IRQ_HANDLED\n");
 
 	return IRQ_HANDLED;
 };
@@ -329,16 +342,21 @@ static irqreturn_t ad7606_interrupt(int irq, void *dev_id)
 static int ad7606_validate_trigger(struct iio_dev *indio_dev,
 				   struct iio_trigger *trig)
 {
-	//struct ad7606_state *st = iio_priv(indio_dev);
+	struct ad7606_state *st = iio_priv(indio_dev);
 
 	//if (st->trig != trig)
 	//	return -EINVAL;
 
 	//return 0;
 	int ret;
-	printk(KERN_INFO "ad7606:validating trigger:%s\n",trig->name);
+	pr_debug("ad7606:validating trigger:%s\n",trig->name);
 	ret = strcmp(trig->name,"hrtimer0");
-	printk(KERN_INFO "ad7606:validating trigger:%u\n",ret);
+	pr_debug("ad7606:validating trigger:%u\n",ret);
+	if (ret == 0)
+	{
+		pr_debug("ad7606:setting trigger to state:%u\n",ret);
+		st->trig = trig;
+	}
 
 	return !(ret == 0);// DEBUGGING external trigger setup
 	
@@ -349,6 +367,7 @@ static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 	struct ad7606_state *st = iio_priv(indio_dev);
 
 	gpiod_set_value(st->gpio_convst, 1);
+	ndelay(TIMINGDELAY);
 
 	return 0;
 }
@@ -358,6 +377,7 @@ static int ad7606_buffer_predisable(struct iio_dev *indio_dev)
 	struct ad7606_state *st = iio_priv(indio_dev);
 
 	gpiod_set_value(st->gpio_convst, 0);
+	ndelay(TIMINGDELAY);
 
 	return 0;
 }
@@ -628,9 +648,11 @@ unsigned long phy_addr;
 
 int ad7606_reset(struct ad7606_state *st)
 {
+	pr_warn("ad7606:ad7606_reset called!");
+
 	if (st->gpio_reset) {
 		gpiod_set_value(st->gpio_reset, 1);
-		ndelay(100); /* t_reset >= 100ns */
+		ndelay(TIMINGDELAY); /* t_reset >= 100ns */
 		gpiod_set_value(st->gpio_reset, 0);
 		return 0;
 	}
@@ -656,6 +678,8 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 
 	iio_push_to_buffers_with_timestamp(indio_dev, st->data,
 					   iio_get_time_ns(indio_dev));
+	// TODO : use pointer to store iio_get_time_ns() timestamp closer to the end of conversion process
+	
 error_ret:
 	iio_trigger_notify_done(indio_dev->trig);
 	/* The rising edge of the CONVST signal starts a new conversion. */
@@ -687,7 +711,7 @@ static int ad7606_par16_read_block(struct device *dev,
 	int num = count; // total number of channels to read.
 	u16 *_buf = buf;
 	u32 val;
-	u16 delay_ns = 200;
+	u16 delay_ns = TIMINGDELAY;
 
 
 
@@ -1316,12 +1340,12 @@ int ad7606_probe(struct platform_device *pdev)
 
 static int __init board_init(void)
 {
-    printk(KERN_INFO "ad7606_par module init.");
+    pr_debug("ad7606_par module init.");
 	
 	//platform_add_devices(board_devices, ARRAY_SIZE(board_devices));
-	printk(KERN_INFO "platform_add_devices() called.");
+	pr_debug("platform_add_devices() called.");
 	platform_driver_register(&ad7606_driver);
-	printk(KERN_INFO "platform_driver_register() called.");
+	pr_debug("platform_driver_register() called.");
 	
 
     return 0;
@@ -1329,23 +1353,23 @@ static int __init board_init(void)
 
 static void board_unload(void)
 {
-    printk(KERN_INFO "ad7606_par module unload.");
+    pr_debug("ad7606_par module unload.");
 	//struct iio_dev *indio_dev = dev_get_drvdata(&_pdev->dev);
 	//devm_iio_device_unregister(&_pdev->dev, indio_dev);
-	//printk(KERN_INFO "devm_iio_device_unregister() called.");
+	//pr_debug("devm_iio_device_unregister() called.");
 	
 	//devm_iio_device_free(indio_dev);
-	//printk(KERN_INFO "devm_iio_device_free() called.");
+	//pr_debug("devm_iio_device_free() called.");
 	
 	//platform_device_unregister(_pdev);
-	//printk(KERN_INFO "platform_device_unregister() called.");
+	//pr_debug("platform_device_unregister() called.");
 
 
 	platform_driver_unregister(&ad7606_driver);
-	printk(KERN_INFO "platform_driver_unregister() called.");
+	pr_debug("platform_driver_unregister() called.");
 	//iounmap(addr);
 	//release_mem_region(phy_addr,SZ_4K);
-	printk(KERN_INFO "module unloaded sucessfully.");
+	pr_debug("module unloaded sucessfully.");
 	
 }
 
