@@ -323,17 +323,21 @@ static irqreturn_t ad7606_interrupt(int irq, void *dev_id)
 	pr_debug("ad7606:get state\n");
 
 
-
+	/*
+	TEST : this was internal trigger old code
 	if (iio_buffer_enabled(indio_dev)) {
-		gpiod_set_value(st->gpio_convst, 0);
-		ndelay(TIMINGDELAY);
-		pr_debug("ad7606:set convst 0\n");
 		iio_trigger_poll_nested(st->trig);
 		pr_debug("ad7606:trigger_poll_nested\n");
 
 	} else {
 		complete(&st->completion);
 	}
+	*/
+
+	// TEST : external trigger code, we signal the trigger handler that conversion is done
+	complete(&st->completion);
+	// END TEST
+
 	pr_debug("ad7606:return IRQ_HANDLED\n");
 
 	return IRQ_HANDLED;
@@ -665,12 +669,29 @@ EXPORT_SYMBOL_NS_GPL(ad7606_reset, IIO_AD7606);
 
 static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 {
+	// TEST : modifying code to process an external trigger such as hrtimer, not the device internally managed trigger.
+	// this should be the entry point when a timer expires.
+
 	struct iio_poll_func *pf = p;
 	struct iio_dev *indio_dev = pf->indio_dev;
 	struct ad7606_state *st = iio_priv(indio_dev);
 	int ret;
 
 	guard(mutex)(&st->lock);
+
+	// TEST external trigger : initiate a conversion by strobing convst
+	gpiod_set_value(st->gpio_convst, 0);
+	ndelay(TIMINGDELAY);
+	gpiod_set_value(st->gpio_convst, 1);
+	// now wait for IRQ to fire, signaling BUSY falling edge, and end of conversion. the irq handler will set completion
+	ret = wait_for_completion_timeout(&st->completion,
+		msecs_to_jiffies(1000));
+	if (!ret) {
+		ret = -ETIMEDOUT;
+		goto error_ret;
+	}
+	// end TEST external trigger
+	// conversion has ended, read samples
 
 	ret = ad7606_read_samples(st);
 	if (ret)
@@ -682,8 +703,11 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 	
 error_ret:
 	iio_trigger_notify_done(indio_dev->trig);
-	/* The rising edge of the CONVST signal starts a new conversion. */
-	gpiod_set_value(st->gpio_convst, 1);
+	
+	// TEST external trigger
+	//// The rising edge of the CONVST signal starts a new conversion.
+	// gpiod_set_value(st->gpio_convst, 1);
+	// END TEST external trigger
 
 	return IRQ_HANDLED;
 }
