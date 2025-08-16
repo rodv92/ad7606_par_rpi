@@ -115,6 +115,9 @@ struct ad7606_state {
 	struct gpio_descs		*gpio_os;
 	struct gpio_descs		*gpio_parallel_data; /* for now, 16 line parallel data lines*/
 	
+	struct gpio_descs		*gpio_cs_rd /* used when cs and rd are set to the same value at once, 
+	ex : start of read strobe cycle or i/o error*/
+
 	struct iio_trigger		*trig;
 	struct completion		completion;
 

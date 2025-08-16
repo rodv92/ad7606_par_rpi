@@ -20,7 +20,7 @@
  *
  */
 //#define DEBUG
-#define TIMINGDELAY 20000
+#define TIMINGDELAY 1000
 
 #include <linux/types.h>
 #include <linux/property.h>
@@ -69,8 +69,16 @@
 #include "ad7606.h"
 #include "ad7606_bus_iface.h"
 
-#define GPIOGET 13
+#define GPIOSET(x,y) gpiod_set_raw_value(x, y)
+#define GPIOSETARR(z,x,y) gpiod_set_raw_array_value(z, x, NULL, y)
 
+// x = pin_desc or desc array
+// y = value
+// z = number of pins in the array
+
+// gpiod_set_raw_value is preferred as all pins are active_high besides standby, and standby is not used.
+// would probably give a handful of cpu cycles gain per call
+// ACTIVE_LOW / ACTIVE_HIGH specification would remain in device tree solely for informational purposes.
 
 /*
  * Scales are computed as 5000/32768 and 10000/32768 respectively,
@@ -286,15 +294,26 @@ static int ad7606_request_gpios(struct ad7606_state *st)
 
 
 
-	if (!st->chip_info->oversampling_num)
-		return 0;
+	//st->gpio_cs_rd[0] = st->gpio_cs;
+	//st->gpio_cs_rd[1] = st->gpio_rd;
+	
+
+	st->gpio_cs_rd = devm_gpiod_get_array(dev,
+		"cs-rd",
+		GPIOD_OUT_LOW);
+	if(IS_ERR(st->gpio_cs_rd))
+		return PTR_ERR(st->gpio_cs_rd);
 
 	st->gpio_parallel_data = devm_gpiod_get_array(dev,
-			"adi,parallel-data",
-			GPIOD_IN);
+		"adi,parallel-data",
+		GPIOD_IN);
 	if(IS_ERR(st->gpio_parallel_data))
 		return PTR_ERR(st->gpio_parallel_data);
 
+
+
+	if (!st->chip_info->oversampling_num)
+		return 0;
 
 	st->gpio_os = devm_gpiod_get_array_optional(dev,
 						    "adi,oversampling-ratio",
@@ -370,7 +389,7 @@ static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 {
 	struct ad7606_state *st = iio_priv(indio_dev);
 
-	gpiod_set_value(st->gpio_convst, 1);
+	GPIOSET(st->gpio_convst, 1);
 	ndelay(TIMINGDELAY);
 
 	return 0;
@@ -380,7 +399,7 @@ static int ad7606_buffer_predisable(struct iio_dev *indio_dev)
 {
 	struct ad7606_state *st = iio_priv(indio_dev);
 
-	gpiod_set_value(st->gpio_convst, 0);
+	GPIOSET(st->gpio_convst, 0);
 	ndelay(TIMINGDELAY);
 
 	return 0;
@@ -403,7 +422,7 @@ static int ad7606_scan_direct(struct iio_dev *indio_dev, unsigned int ch)
 	struct ad7606_state *st = iio_priv(indio_dev);
 	int ret;
 
-	gpiod_set_value(st->gpio_convst, 1);
+	GPIOSET(st->gpio_convst, 1);
 	ret = wait_for_completion_timeout(&st->completion,
 					  msecs_to_jiffies(1000));
 	if (!ret) {
@@ -416,7 +435,7 @@ static int ad7606_scan_direct(struct iio_dev *indio_dev, unsigned int ch)
 		ret = st->data[ch];
 
 error_ret:
-	gpiod_set_value(st->gpio_convst, 0);
+	GPIOSET(st->gpio_convst, 0);
 
 	return ret;
 }
@@ -457,7 +476,7 @@ static int ad7606_write_scale_hw(struct iio_dev *indio_dev, int ch, int val)
 {
 struct ad7606_state *st = iio_priv(indio_dev);
 
-gpiod_set_value(st->gpio_range, val);
+GPIOSET(st->gpio_range, val);
 
 return 0;
 }
@@ -655,9 +674,9 @@ int ad7606_reset(struct ad7606_state *st)
 	pr_warn("ad7606:ad7606_reset called!");
 
 	if (st->gpio_reset) {
-		gpiod_set_value(st->gpio_reset, 1);
+		GPIOSET(st->gpio_reset, 1);
 		ndelay(TIMINGDELAY); /* t_reset >= 100ns */
-		gpiod_set_value(st->gpio_reset, 0);
+		GPIOSET(st->gpio_reset, 0);
 		return 0;
 	}
 
@@ -680,9 +699,9 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 	guard(mutex)(&st->lock);
 
 	// TEST external trigger : initiate a conversion by strobing convst
-	gpiod_set_value(st->gpio_convst, 0);
+	GPIOSET(st->gpio_convst, 0);
 	ndelay(TIMINGDELAY);
-	gpiod_set_value(st->gpio_convst, 1);
+	GPIOSET(st->gpio_convst, 1);
 	// now wait for IRQ to fire, signaling BUSY falling edge, and end of conversion. the irq handler will set completion
 	ret = wait_for_completion_timeout(&st->completion,
 		msecs_to_jiffies(1000));
@@ -745,14 +764,14 @@ static int ad7606_par16_read_block(struct device *dev,
 	*
 	*/
 
-	gpiod_set_value(st->gpio_cs,0); // chip select set to low. 
-	    // TODO : check that line propery is default (active high) in gpio setup
+	//GPIOSET(st->gpio_cs,0); // chip select set to low. 
 		// add proper timing constraints. test : sleep based and delay functions
 		// https://stackoverflow.com/questions/15994603/how-to-sleep-in-the-linux-kernel
 		// TODO : check the timing behaviour of that call, or use MMIO to set value directly
 	
-	ndelay(delay_ns);
-	gpiod_set_value(st->gpio_rd,0); // rd set to low, read first channel
+	//ndelay(delay_ns);
+	//GPIOSET(st->gpio_rd,0); // rd set to low, read first channel
+	GPIOSETARR(2,st->gpio_cs_rd,0);
 	ndelay(delay_ns);
 
 	bool first_channel = true;
@@ -780,9 +799,10 @@ static int ad7606_par16_read_block(struct device *dev,
 		{
 			dev_dbg(dev,"ad7606:channel read. IO error, frstdata level not expected\n");
 			
-			gpiod_set_value(st->gpio_cs,1); // putting back cs to active high due to IO error
-			gpiod_set_value(st->gpio_rd,1); // putting back rd to active high due to IO error
- 
+			//GPIOSET(st->gpio_cs,1); // putting back cs to active high due to IO error
+			//GPIOSET(st->gpio_rd,1); // putting back rd to active high due to IO error
+			GPIOSETARR(2,st->gpio_cs_rd,1);
+
 			// TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);		
 			ad7606_reset(st);
@@ -792,15 +812,16 @@ static int ad7606_par16_read_block(struct device *dev,
 
 		}
 
-		gpiod_set_value(st->gpio_rd,1); // rd strobe, read next channel
+		GPIOSET(st->gpio_rd,1); // rd strobe, read next channel
 		ndelay(delay_ns);
-		gpiod_set_value(st->gpio_rd,0);
+		GPIOSET(st->gpio_rd,0);
 		ndelay(delay_ns);
 		
 
 	}
-	gpiod_set_value(st->gpio_cs,1); // data read end, putting back cs to active high
-	gpiod_set_value(st->gpio_rd,1); // data read end, putting back rd to active high
+	//GPIOSET(st->gpio_cs,1); // data read end, putting back cs to active high
+	//GPIOSET(st->gpio_rd,1); // data read end, putting back rd to active high
+	GPIOSETARR(2,st->gpio_cs_rd,1);
 
 	// TODO : check that line propery is default (active high) in gpio setup
 	ndelay(delay_ns);
@@ -856,7 +877,7 @@ static int ad7606_par8_read_block(struct device *dev,
 	 *
 	 */
 
-	gpiod_set_value(st->gpio_cs,0); // TODO : check that line propery is default (active high) in gpio setup
+	GPIOSET(st->gpio_cs,0); // TODO : check that line propery is default (active high) in gpio setup
 		// add proper timing constraints. test : sleep based and delay functions
 		// https://stackoverflow.com/questions/15994603/how-to-sleep-in-the-linux-kernel
 	
@@ -888,16 +909,16 @@ static int ad7606_par8_read_block(struct device *dev,
 
 			val = readl(st->base_address);
 			lsb = (val >> 8) & 0xFF; // extract 8 bits (lsb)
-			gpiod_set_value(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
-			gpiod_set_value(st->gpio_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+			GPIOSET(st->gpio_rd,0); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
 
 			val = readl(st->base_address);
 			msb = (val >> 8) & 0xFF; // extract 8 bits (msb)
-			gpiod_set_value(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
-			gpiod_set_value(st->gpio_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+			GPIOSET(st->gpio_rd,0); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
 			// at this point frstdata should be low (after falling edge of CS/RD above, per datasheet)		
 
@@ -907,9 +928,12 @@ static int ad7606_par8_read_block(struct device *dev,
 		}
 		else
 		{
-			gpiod_set_value(st->gpio_cs,1); // TODO : check that line propery is default (active high) in gpio setup
-			gpiod_set_value(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			//GPIOSET(st->gpio_cs,1); // TODO : check that line propery is default (active high) in gpio setup
+			//GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
+			GPIOSETARR(2,st->gpio_cs_rd,1);
+
 			ndelay(delay_ns);		
+			
 			ad7606_reset(st);
 			// IO error, the IC signals first channel conversion although it's not, or doesn't signal first channel
 			// conversion although it should be.
@@ -918,8 +942,10 @@ static int ad7606_par8_read_block(struct device *dev,
 		}
 
 	}
-	gpiod_set_value(st->gpio_cs,1); // TODO : check that line propery is default (active high) in gpio setup
-	gpiod_set_value(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup			
+	//GPIOSET(st->gpio_cs,1); // TODO : check that line propery is default (active high) in gpio setup
+	//GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup			
+	GPIOSETARR(2,st->gpio_cs_rd,1);
+
 	ndelay(delay_ns);
 	
 }
