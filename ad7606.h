@@ -96,6 +96,7 @@ struct ad7606_state {
 	unsigned int			oversampling;
 	void __iomem			*base_address;
 	bool				sw_mode_en;
+	bool				buffer_enabled;
 	const unsigned int		*scale_avail;
 	unsigned int			num_scales;
 	const unsigned int		*oversampling_avail;
@@ -115,7 +116,7 @@ struct ad7606_state {
 	struct gpio_descs		*gpio_os;
 	struct gpio_descs		*gpio_parallel_data; /* for now, 16 line parallel data lines*/
 	
-	struct gpio_descs		*gpio_cs_rd /* used when cs and rd are set to the same value at once, 
+	struct gpio_descs		*gpio_cs_rd; /* used when cs and rd are set to the same value at once, 
 	ex : start of read strobe cycle or i/o error*/
 
 	struct iio_trigger		*trig;

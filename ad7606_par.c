@@ -25,6 +25,8 @@
 #include <linux/types.h>
 #include <linux/property.h>
 #include <linux/sizes.h>
+#include <linux/bitmap.h>
+
 
 #include <linux/io.h>
 #include <linux/ioport.h>
@@ -63,6 +65,8 @@
 #include <linux/iio/trigger.h>
 #include <linux/iio/triggered_buffer.h>
 #include <linux/iio/trigger_consumer.h>
+#include <linux/iio/buffer_impl.h>
+
 
 
 
@@ -70,7 +74,12 @@
 #include "ad7606_bus_iface.h"
 
 #define GPIOSET(x,y) gpiod_set_raw_value(x, y)
-#define GPIOSETARR(z,x,y) gpiod_set_raw_array_value(z, x, NULL, y)
+#define GPIOSETARR(w,x,y,z) gpiod_set_raw_array_value(w, x, y, z)
+
+
+static long cs_rd_values_zero[1];
+static long cs_rd_values_one[1];
+
 
 // x = pin_desc or desc array
 // y = value
@@ -257,42 +266,55 @@ static const struct ad7606_chip_info ad7606_chip_info_tbl[] = {
 static int ad7606_request_gpios(struct ad7606_state *st)
 {
 	struct device *dev = st->dev;
+	dev_dbg(dev,"ad7606:entered ad7606_request_gpios()\n");
+	
 
 	st->gpio_convst = devm_gpiod_get(dev, "adi,conversion-start",
 					 GPIOD_OUT_LOW);
 	if (IS_ERR(st->gpio_convst))
 		return PTR_ERR(st->gpio_convst);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_convst set\n");
+	
 
 	st->gpio_reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(st->gpio_reset))
 		return PTR_ERR(st->gpio_reset);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_reset set\n");
+
 
 	st->gpio_range = devm_gpiod_get_optional(dev, "adi,range",
 						 GPIOD_OUT_LOW);
 	if (IS_ERR(st->gpio_range))
 		return PTR_ERR(st->gpio_range);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_range set\n");
+
 
 	st->gpio_standby = devm_gpiod_get_optional(dev, "standby",
 						   GPIOD_OUT_LOW);
 	if (IS_ERR(st->gpio_standby))
 		return PTR_ERR(st->gpio_standby);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_standby set\n");
 
 	st->gpio_frstdata = devm_gpiod_get_optional(dev, "adi,first-data",
 						    GPIOD_IN);
 	if (IS_ERR(st->gpio_frstdata))
 		return PTR_ERR(st->gpio_frstdata);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_frstdata set\n");
 
+/*
 	st->gpio_cs = devm_gpiod_get_optional(dev, "cs",
 			GPIOD_OUT_LOW);
 	if (IS_ERR(st->gpio_cs))
 		return PTR_ERR(st->gpio_cs);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_cs set\n");
+
 
 	st->gpio_rd = devm_gpiod_get_optional(dev, "rd",
 			GPIOD_OUT_LOW);
 	if (IS_ERR(st->gpio_rd))
 		return PTR_ERR(st->gpio_rd);
-
-
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_rd set\n");
+*/
 
 	//st->gpio_cs_rd[0] = st->gpio_cs;
 	//st->gpio_cs_rd[1] = st->gpio_rd;
@@ -303,13 +325,25 @@ static int ad7606_request_gpios(struct ad7606_state *st)
 		GPIOD_OUT_LOW);
 	if(IS_ERR(st->gpio_cs_rd))
 		return PTR_ERR(st->gpio_cs_rd);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_cs_rd set\n");
+
+	st->gpio_cs = st->gpio_cs_rd->desc[0];
+	st->gpio_rd = st->gpio_cs_rd->desc[1];
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():individual gpio_cs and gpio_rd set\n");
+	
+	//TODO: put bitmap in state
+	bitmap_zero(cs_rd_values_zero,2);
+	bitmap_zero(cs_rd_values_one,2);
+	cs_rd_values_one[0] = GENMASK(1, 0);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():cs_rd bitmaps set\n");
+
 
 	st->gpio_parallel_data = devm_gpiod_get_array(dev,
 		"adi,parallel-data",
 		GPIOD_IN);
 	if(IS_ERR(st->gpio_parallel_data))
 		return PTR_ERR(st->gpio_parallel_data);
-
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_parallel_data set\n");
 
 
 	if (!st->chip_info->oversampling_num)
@@ -318,10 +352,9 @@ static int ad7606_request_gpios(struct ad7606_state *st)
 	st->gpio_os = devm_gpiod_get_array_optional(dev,
 						    "adi,oversampling-ratio",
 						    GPIOD_OUT_LOW);
+	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_os set\n");
+
 	return PTR_ERR_OR_ZERO(st->gpio_os);
-
-	
-
 
 }
 
@@ -387,7 +420,16 @@ static int ad7606_validate_trigger(struct iio_dev *indio_dev,
 
 static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 {
+	
 	struct ad7606_state *st = iio_priv(indio_dev);
+	
+	if(!try_module_get(THIS_MODULE))
+	{
+		dev_warn(st->dev, "buffer is enabled, but failed to prevent future module unload while it is enabled\n");
+	} // dirty fix to prevent module unload (such as done by rmmod)
+	// while buffer is enabled.
+
+	st->buffer_enabled = true;
 
 	GPIOSET(st->gpio_convst, 1);
 	ndelay(TIMINGDELAY);
@@ -397,7 +439,11 @@ static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 
 static int ad7606_buffer_predisable(struct iio_dev *indio_dev)
 {
+
 	struct ad7606_state *st = iio_priv(indio_dev);
+
+	module_put(THIS_MODULE);
+	st->buffer_enabled = false;
 
 	GPIOSET(st->gpio_convst, 0);
 	ndelay(TIMINGDELAY);
@@ -771,7 +817,8 @@ static int ad7606_par16_read_block(struct device *dev,
 	
 	//ndelay(delay_ns);
 	//GPIOSET(st->gpio_rd,0); // rd set to low, read first channel
-	GPIOSETARR(2,st->gpio_cs_rd,0);
+	GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
+	
 	ndelay(delay_ns);
 
 	bool first_channel = true;
@@ -801,7 +848,8 @@ static int ad7606_par16_read_block(struct device *dev,
 			
 			//GPIOSET(st->gpio_cs,1); // putting back cs to active high due to IO error
 			//GPIOSET(st->gpio_rd,1); // putting back rd to active high due to IO error
-			GPIOSETARR(2,st->gpio_cs_rd,1);
+			GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+	
 
 			// TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);		
@@ -821,8 +869,8 @@ static int ad7606_par16_read_block(struct device *dev,
 	}
 	//GPIOSET(st->gpio_cs,1); // data read end, putting back cs to active high
 	//GPIOSET(st->gpio_rd,1); // data read end, putting back rd to active high
-	GPIOSETARR(2,st->gpio_cs_rd,1);
-
+	GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+	
 	// TODO : check that line propery is default (active high) in gpio setup
 	ndelay(delay_ns);
 	dev_dbg(dev,"ad7606:all channels read. exiting callback\n");
@@ -930,7 +978,8 @@ static int ad7606_par8_read_block(struct device *dev,
 		{
 			//GPIOSET(st->gpio_cs,1); // TODO : check that line propery is default (active high) in gpio setup
 			//GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
-			GPIOSETARR(2,st->gpio_cs_rd,1);
+			GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+	
 
 			ndelay(delay_ns);		
 			
@@ -944,7 +993,8 @@ static int ad7606_par8_read_block(struct device *dev,
 	}
 	//GPIOSET(st->gpio_cs,1); // TODO : check that line propery is default (active high) in gpio setup
 	//GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup			
-	GPIOSETARR(2,st->gpio_cs_rd,1);
+	GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+	
 
 	ndelay(delay_ns);
 	
@@ -1136,7 +1186,6 @@ void ad7606_remove(struct platform_device *pdev)
 	////struct iio_dev *indio_dev = dev_to_iio_dev(pdev->dev);
 	//struct ad7606_state *st = iio_priv(indio_dev);
 
-
 }
 
 int ad7606_probe(struct platform_device *pdev)
@@ -1244,6 +1293,7 @@ int ad7606_probe(struct platform_device *pdev)
 	st->oversampling = 1;
 	st->scale_avail = ad7606_scale_avail;
 	st->num_scales = ARRAY_SIZE(ad7606_scale_avail);
+	st->buffer_enabled = false;
 	
 	ret = devm_regulator_get_enable(&pdev->dev, "avcc");
 	if (ret)
@@ -1373,8 +1423,8 @@ int ad7606_probe(struct platform_device *pdev)
 	dev_dbg(&pdev->dev,"ad7606:devm_iio_triggered_buffer_setup() ok\n");
 
 
-	//u32 __iomem * addr_test = (u32 __iomem *) offset_addr;
 	
+	#if DEBUG
 	for(u16 i = 0;i<256;i++)
 	{ 
 		u32 testval = readl(addr);
@@ -1382,6 +1432,7 @@ int ad7606_probe(struct platform_device *pdev)
 		dev_dbg(&pdev->dev,"readl() on GPIO memory map test : val = %u\n",testval);
 		addr = (u32 __iomem *) addr + 1;
 	}
+	#endif
 
 	return devm_iio_device_register(&pdev->dev, indio_dev);
 		
@@ -1396,7 +1447,6 @@ static int __init board_init(void)
 	pr_debug("platform_add_devices() called.");
 	platform_driver_register(&ad7606_driver);
 	pr_debug("platform_driver_register() called.");
-	
 
     return 0;
 }

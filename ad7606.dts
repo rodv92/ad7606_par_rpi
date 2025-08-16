@@ -22,7 +22,10 @@
                 adi,first-data-gpios = <&gpio 7 GPIO_ACTIVE_HIGH>;
                 cs-gpios = <&gpio 2 GPIO_ACTIVE_HIGH>;
                 rd-gpios = <&gpio 3 GPIO_ACTIVE_HIGH>;
-                cs-rd-gpios = <&gpio 2 GPIO_ACTIVE_HIGH &gpio 3 GPIO_ACTIVE_HIGH> 
+                cs-rd-gpios = <
+                &gpio 2 GPIO_ACTIVE_HIGH 
+                &gpio 3 GPIO_ACTIVE_HIGH
+                >; 
                 adi,oversampling-ratio-gpios = <&gpio 24 GPIO_ACTIVE_HIGH
                                 &gpio 25 GPIO_ACTIVE_HIGH
                                 &gpio 26 GPIO_ACTIVE_HIGH>;
