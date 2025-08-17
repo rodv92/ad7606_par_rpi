@@ -37,9 +37,9 @@
 #include <linux/of_device.h>
 
 #include <linux/err.h>
-#include <linux/interrupt.h>
 
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
 
@@ -428,10 +428,21 @@ static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 	// while buffer is enabled.
 	if(!try_module_get(THIS_MODULE))
 	{
-		dev_warn(st->dev, "buffer is enabled, but failed to prevent future module unload while it is enabled\n");
+		dev_warn(st->dev, "buffer is enabled, but failed to prevent future module unloading while it is enabled\n");
 	} 
 	
-	st->buffer_enabled = true;
+	if(indio_dev->scan_bytes)
+	{
+		st->data_scan_elements = kmalloc(indio_dev->scan_bytes + 8,GFP_KERNEL); // plus 8 bytes for TIMESTAMP.
+		if(!st->data_scan_elements) {return -ENOMEM;}
+		st->buffer_enabled = true;
+	}
+	else
+	{
+		dev_warn(st->dev, "cannot enable buffer with zero scan elements!\n");
+		// TODO : TEST : check that this condition is not already managed upstream by iio buffer management
+		return -EINVAL;
+	}
 
 	GPIOSET(st->gpio_convst, 1);
 	ndelay(TIMINGDELAY);
@@ -444,13 +455,14 @@ static int ad7606_buffer_predisable(struct iio_dev *indio_dev)
 
 	struct ad7606_state *st = iio_priv(indio_dev);
 	
+	
+	kfree(st->data_scan_elements);
+	GPIOSET(st->gpio_convst, 0);
+	ndelay(TIMINGDELAY);
+	st->buffer_enabled = false;
 	//dirty fix : decrement module refcount to allow unloading, since the buffer is disabled
 	module_put(THIS_MODULE);
 	
-	st->buffer_enabled = false;
-
-	GPIOSET(st->gpio_convst, 0);
-	ndelay(TIMINGDELAY);
 
 	return 0;
 }
@@ -766,8 +778,19 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 	if (ret)
 		goto error_ret;
 
-	iio_push_to_buffers_with_timestamp(indio_dev, st->data,
+	u8 chan;
+	u8 scan_idx = 0;
+	for_each_set_bit(chan,indio_dev->active_scan_mask,indio_dev->masklength)
+	{
+		st->data_scan_elements[scan_idx++] = st->data[chan];
+	}
+
+	iio_push_to_buffers_with_timestamp(indio_dev, st->data_scan_elements,
 					   iio_get_time_ns(indio_dev));
+
+
+	//	iio_push_to_buffers_with_timestamp(indio_dev, st->data,
+//					   iio_get_time_ns(indio_dev));
 	// TODO : use pointer to store iio_get_time_ns() timestamp closer to the end of conversion process
 	
 error_ret:
@@ -841,7 +864,7 @@ static int ad7606_par16_read_block(struct device *dev,
 			
 
 			*_buf = (s16) ((val >> 8) & 0xFFFF); // extract 16 bits
-			dev_dbg(dev,"ad7606:channel read. 16 bit shift/mask val=%hs\n",*_buf);
+			dev_dbg(dev,"ad7606:channel read. 16 bit shift/mask val=%hd\n",*_buf);
 
 			_buf++;
 			num--;

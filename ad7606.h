@@ -1,8 +1,23 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * AD7606 ADC driver
+ * AD7606 Parallel Interface ADC driver
  *
  * Copyright 2011 Analog Devices Inc.
+ *
+ * Notice : Derivative Work
+ *
+ * Copyright 2025 SKYNEXT Rodrigo Verissimo EURL
+ *
+ * Raspberry Pi ad7606 iio implementation, with CS/RD pin support for reading all channels
+ * Implementation of a loadable module
+ * Integration of MMIO address space into reg property of the device tree
+ * instead of board support code
+ * Adding support for byte shifting to extract conversion results on GPIO BCM
+ * BCM pins GPIO8 to GPIO23 as parallel interface pins, while maintaining memory aligment constrains (4 byte alignment, 4 byte read i/o)
+ * 
+ * Tested on Raspberry Pi Zero W 1.1
+ * Added debug logging
+ *
  */
 
 #ifndef IIO_ADC_AD7606_H_
@@ -127,7 +142,8 @@ struct ad7606_state {
 	 * transfer buffers to live in their own cache lines.
 	 * 16 * 16-bit samples + 64-bit timestamp
 	 */
-	unsigned short			data[20] __aligned(IIO_DMA_MINALIGN);
+	unsigned short			data[20] __aligned(IIO_DMA_MINALIGN); // will store all channels, regardless of scan enabled channels
+	unsigned short			*data_scan_elements; // TEST : pointer to stack allocated buffer for scan enabled channels (scan_bytes + 8 bytes for timestamp)
 	__be16				d16[2];
 };
 
