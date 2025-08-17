@@ -423,12 +423,14 @@ static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 	
 	struct ad7606_state *st = iio_priv(indio_dev);
 	
+	
+	// dirty fix, increment module refcount to prevent module unload (such as done by rmmod)
+	// while buffer is enabled.
 	if(!try_module_get(THIS_MODULE))
 	{
 		dev_warn(st->dev, "buffer is enabled, but failed to prevent future module unload while it is enabled\n");
-	} // dirty fix to prevent module unload (such as done by rmmod)
-	// while buffer is enabled.
-
+	} 
+	
 	st->buffer_enabled = true;
 
 	GPIOSET(st->gpio_convst, 1);
@@ -441,8 +443,10 @@ static int ad7606_buffer_predisable(struct iio_dev *indio_dev)
 {
 
 	struct ad7606_state *st = iio_priv(indio_dev);
-
+	
+	//dirty fix : decrement module refcount to allow unloading, since the buffer is disabled
 	module_put(THIS_MODULE);
+	
 	st->buffer_enabled = false;
 
 	GPIOSET(st->gpio_convst, 0);
@@ -454,7 +458,7 @@ static int ad7606_buffer_predisable(struct iio_dev *indio_dev)
 static int ad7606_read_samples(struct ad7606_state *st)
 {
 	unsigned int num = st->chip_info->num_channels - 1;
-	u16 *data = st->data;
+	s16 *data = st->data;
 
 	// TODO : implement channel subset read of channels 0 to n -1;
 	// with n <= num_channels
@@ -798,7 +802,7 @@ static int ad7606_par16_read_block(struct device *dev,
 
 
 	int num = count; // total number of channels to read.
-	u16 *_buf = buf;
+	s16 *_buf = buf;
 	u32 val;
 	u16 delay_ns = TIMINGDELAY;
 
@@ -836,8 +840,8 @@ static int ad7606_par16_read_block(struct device *dev,
 			dev_dbg(dev,"ad7606:channel read. raw base_address val=%u\n",val);
 			
 
-			*_buf = (u16) ((val >> 8) & 0xFFFF); // extract 16 bits
-			dev_dbg(dev,"ad7606:channel read. 16 bit shift/mask val=%hu\n",*_buf);
+			*_buf = (s16) ((val >> 8) & 0xFFFF); // extract 16 bits
+			dev_dbg(dev,"ad7606:channel read. 16 bit shift/mask val=%hs\n",*_buf);
 
 			_buf++;
 			num--;
@@ -860,9 +864,14 @@ static int ad7606_par16_read_block(struct device *dev,
 
 		}
 
-		GPIOSET(st->gpio_rd,1); // rd strobe, read next channel
+		//GPIOSET(st->gpio_rd,1); // rd strobe, read next channel
+		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+		
 		ndelay(delay_ns);
-		GPIOSET(st->gpio_rd,0);
+		
+		//GPIOSET(st->gpio_rd,0);
+		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
+	
 		ndelay(delay_ns);
 		
 
@@ -912,7 +921,7 @@ static int ad7606_par8_read_block(struct device *dev,
 	 * allows to recover from such failure situations.
 	 */
 	int num = count; // total number of channels to read.
-	u16 *_buf = buf;
+	s16 *_buf = buf;
 	u32 val;
 	u8 lsb, msb;
 	u16 delay_ns = 200;
@@ -930,6 +939,9 @@ static int ad7606_par8_read_block(struct device *dev,
 		// https://stackoverflow.com/questions/15994603/how-to-sleep-in-the-linux-kernel
 	
 	ndelay(delay_ns);
+
+
+	GPIOSET(st->gpio_rd,0);
 	
 	// strobe cycle 0.4us, total read time for all channels = 0.4us * 2 * 8 reads, 12.8us, which gives max sampling rate of 156.250 ksps per channel
 	// not accounting preamble delays (convst signal )
@@ -951,8 +963,7 @@ static int ad7606_par8_read_block(struct device *dev,
 	{
 		if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
 		{
-			first_channel = false; 
-
+			 
 			//insb((unsigned long)st->base_address, _buf, 2);
 
 			val = readl(st->base_address);
@@ -966,13 +977,17 @@ static int ad7606_par8_read_block(struct device *dev,
 			msb = (val >> 8) & 0xFF; // extract 8 bits (msb)
 			GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
-			GPIOSET(st->gpio_rd,0); // TODO : check that line propery is default (active high) in gpio setup
-			ndelay(delay_ns);
+			if(num != 1) 
+			{
+				GPIOSET(st->gpio_rd,0); // TODO : check that line propery is default (active high) in gpio setup
+				ndelay(delay_ns);
+			}
 			// at this point frstdata should be low (after falling edge of CS/RD above, per datasheet)		
 
-			*_buf = ((u16) msb << 8) | lsb; // combine into 16 bit channel sample value
+			*_buf = ((s16) msb << 8) | lsb; // combine into 16 bit channel sample value
 			_buf++;
 			num--;
+			first_channel = false;
 		}
 		else
 		{
@@ -991,9 +1006,9 @@ static int ad7606_par8_read_block(struct device *dev,
 		}
 
 	}
-	//GPIOSET(st->gpio_cs,1); // TODO : check that line propery is default (active high) in gpio setup
+	GPIOSET(st->gpio_cs,1); // TODO : check that line propery is default (active high) in gpio setup
 	//GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup			
-	GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+	//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
 	
 
 	ndelay(delay_ns);
