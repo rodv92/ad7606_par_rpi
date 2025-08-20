@@ -20,7 +20,7 @@
  *
  */
 //#define DEBUG
-#define TIMINGDELAY 1000
+#define TIMINGDELAY 20000
 
 #include <linux/types.h>
 #include <linux/property.h>
@@ -39,6 +39,9 @@
 #include <linux/err.h>
 
 #include <linux/kernel.h>
+#include <linux/ktime.h>
+#include <linux/timekeeping.h>
+
 #include <linux/slab.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
@@ -473,7 +476,7 @@ static int ad7606_read_samples(struct ad7606_state *st)
 	s16 *data = st->data;
 
 	// TODO : implement channel subset read of channels 0 to n -1;
-	// with n <= num_channels
+	// with n <= num_channels, if the hardware protocol permits.
 	// effectively disabling the higher index channels, but potentially increasing effective sample rate
 
 	return st->bops->read_block(st->dev, num, data);
@@ -733,7 +736,7 @@ unsigned long phy_addr;
 
 int ad7606_reset(struct ad7606_state *st)
 {
-	pr_warn("ad7606:ad7606_reset called!");
+	dev_warn(st->dev,"ad7606_reset called!");
 
 	if (st->gpio_reset) {
 		GPIOSET(st->gpio_reset, 1);
@@ -752,11 +755,19 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 {
 	// TEST : modifying code to process an external trigger such as hrtimer, not the device internally managed trigger.
 	// this should be the entry point when a timer expires.
-
+	
 	struct iio_poll_func *pf = p;
 	struct iio_dev *indio_dev = pf->indio_dev;
 	struct ad7606_state *st = iio_priv(indio_dev);
 	int ret;
+
+	//struct timespec64 ts1;
+	//struct timespec64 ts2;
+	
+	//ktime_get_ts64(&ts1);
+	
+
+	//dev_info(st->dev,"enter ad7606_trigger_handler\n");
 
 	guard(mutex)(&st->lock);
 
@@ -790,9 +801,15 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 
 
 	//	iio_push_to_buffers_with_timestamp(indio_dev, st->data,
-//					   iio_get_time_ns(indio_dev));
+	//					   iio_get_time_ns(indio_dev));
 	// TODO : use pointer to store iio_get_time_ns() timestamp closer to the end of conversion process
 	
+	//ktime_get_ts64(&ts2);
+
+	//dev_info(st->dev,"ad7606_trigger_handler exec start:[%5lld.%06ld]\n",(s64) ts1.tv_sec,ts1.tv_nsec/1000);
+	//dev_info(st->dev,"ad7606_trigger_handler exec stop:[%5lld.%06ld]\n",(s64) ts2.tv_sec,ts2.tv_nsec/1000);
+	
+
 error_ret:
 	iio_trigger_notify_done(indio_dev->trig);
 	
@@ -858,7 +875,7 @@ static int ad7606_par16_read_block(struct device *dev,
 
 			//insb((unsigned long)st->base_address, _buf, 2);
 
-			val = readl(st->base_address);
+			val = ioread32(st->base_address);
 			dev_dbg(dev,"ad7606:channel read. num=%u\n",num);
 			dev_dbg(dev,"ad7606:channel read. raw base_address val=%u\n",val);
 			
@@ -871,7 +888,14 @@ static int ad7606_par16_read_block(struct device *dev,
 		}
 		else
 		{
-			dev_dbg(dev,"ad7606:channel read. IO error, frstdata level not expected\n");
+
+			if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
+			{
+				// values disagree, retry.
+				first_channel = false;
+				continue;
+			}
+			dev_warn(dev,"ad7606:channel read. IO error, frstdata level not expected at num=%u\n",num);
 			
 			//GPIOSET(st->gpio_cs,1); // putting back cs to active high due to IO error
 			//GPIOSET(st->gpio_rd,1); // putting back rd to active high due to IO error
@@ -881,6 +905,8 @@ static int ad7606_par16_read_block(struct device *dev,
 			// TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);		
 			ad7606_reset(st);
+			ndelay(delay_ns);		
+			
 			// IO error, the IC signals first channel conversion although it's not, or doesn't signal first channel
 			// conversion although it should be.
 			return -EIO;
@@ -1386,7 +1412,7 @@ int ad7606_probe(struct platform_device *pdev)
 	
 	init_completion(&st->completion);
 	
-	ret = ad7606_reset(st);
+	ret = ad7606_reset(st); // a reset is required after power up to ensure correct RANGE
 	if (ret)
 		dev_warn(st->dev, "failed to RESET: no RESET GPIO specified\n");
 	
