@@ -861,14 +861,21 @@ static int ad7606_par16_read_block(struct device *dev,
 	
 	//ndelay(delay_ns);
 	//GPIOSET(st->gpio_rd,0); // rd set to low, read first channel
-	GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
+	//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
 	
-	ndelay(delay_ns);
+	//ndelay(delay_ns);
 
+	preempt_disable();
 	bool first_channel = true;
 
 	while(num>0)
 	{
+
+		//GPIOSET(st->gpio_rd,0);
+		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
+		ndelay(delay_ns);
+		
+
 		if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
 		{
 			first_channel = false; 
@@ -881,6 +888,8 @@ static int ad7606_par16_read_block(struct device *dev,
 			
 
 			*_buf = (s16) ((val >> 8) & 0xFFFF); // extract 16 bits
+			//*_buf = 0; // extract 16 bits
+			
 			dev_dbg(dev,"ad7606:channel read. 16 bit shift/mask val=%hd\n",*_buf);
 
 			_buf++;
@@ -889,12 +898,12 @@ static int ad7606_par16_read_block(struct device *dev,
 		else
 		{
 
-			if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
-			{
-				// values disagree, retry.
-				first_channel = false;
-				continue;
-			}
+			//if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
+			//{
+				// DEBUG FRSTDATA INSTABILITY values disagree, retry.
+			//	first_channel = false;
+			//	continue;
+			//}
 			dev_warn(dev,"ad7606:channel read. IO error, frstdata level not expected at num=%u\n",num);
 			
 			//GPIOSET(st->gpio_cs,1); // putting back cs to active high due to IO error
@@ -909,30 +918,24 @@ static int ad7606_par16_read_block(struct device *dev,
 			
 			// IO error, the IC signals first channel conversion although it's not, or doesn't signal first channel
 			// conversion although it should be.
+			preempt_enable();
 			return -EIO;
 
 		}
-
 		//GPIOSET(st->gpio_rd,1); // rd strobe, read next channel
 		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
-		
-		ndelay(delay_ns);
-		
-		//GPIOSET(st->gpio_rd,0);
-		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
-	
-		ndelay(delay_ns);
+		ndelay(delay_ns);	
 		
 
 	}
 	//GPIOSET(st->gpio_cs,1); // data read end, putting back cs to active high
 	//GPIOSET(st->gpio_rd,1); // data read end, putting back rd to active high
-	GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+	//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
 	
 	// TODO : check that line propery is default (active high) in gpio setup
 	ndelay(delay_ns);
 	dev_dbg(dev,"ad7606:all channels read. exiting callback\n");
-		
+	preempt_enable();
 	return 0;
 
 /*
