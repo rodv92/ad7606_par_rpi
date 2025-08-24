@@ -20,6 +20,14 @@
  *
  */
 
+ // TODO : use sysfs instead, do no peek into driver internals
+struct iio_hrtimer_info {
+	struct iio_sw_trigger swt;
+	struct hrtimer timer;
+	int sampling_frequency[2];
+	ktime_t period;
+};
+
 #ifndef IIO_ADC_AD7606_H_
 #define IIO_ADC_AD7606_H_
 
@@ -118,6 +126,7 @@ struct ad7606_state {
 	unsigned int			num_os_ratios;
 	int (*write_scale)(struct iio_dev *indio_dev, int ch, int val);
 	int (*write_os)(struct iio_dev *indio_dev, int val);
+	int samplerate[2]; // integer and decimal sample rate (Hz)
 
 	struct mutex			lock; /* protect sensor state */
 	struct gpio_desc		*gpio_convst;

@@ -20,7 +20,7 @@
  *
  */
 //#define DEBUG
-#define TIMINGDELAY 20000
+#define TIMINGDELAY 100
 
 #include <linux/types.h>
 #include <linux/property.h>
@@ -65,12 +65,13 @@
 #include <linux/iio/backend.h>
 #include <linux/iio/buffer.h>
 #include <linux/iio/sysfs.h>
+
 #include <linux/iio/trigger.h>
+#include <linux/iio/sw_trigger.h>
 #include <linux/iio/triggered_buffer.h>
 #include <linux/iio/trigger_consumer.h>
+
 #include <linux/iio/buffer_impl.h>
-
-
 
 
 #include "ad7606.h"
@@ -82,6 +83,10 @@
 
 static long cs_rd_values_zero[1];
 static long cs_rd_values_one[1];
+
+static u64 sample_count;
+static u32 warn_period;
+static u64 io_err_count;
 
 
 // x = pin_desc or desc array
@@ -414,6 +419,14 @@ static int ad7606_validate_trigger(struct iio_dev *indio_dev,
 	if (ret == 0)
 	{
 		pr_debug("ad7606:setting trigger to state:%u\n",ret);
+		struct iio_hrtimer_info *info = iio_trigger_get_drvdata(trig);
+		// get integer part of Hz sampling freq
+		// TODO : use sysfs instead
+		st->samplerate[0] = info->sampling_frequency[0];
+		st->samplerate[1] = info->sampling_frequency[1];
+		pr_info("ad7606:validating trigger, sample rate=%u\n",st->samplerate[0]);
+				
+		
 		st->trig = trig;
 	}
 
@@ -425,7 +438,9 @@ static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 {
 	
 	struct ad7606_state *st = iio_priv(indio_dev);
-	
+	sample_count = 0;
+	warn_period = 0;
+	io_err_count = 0;
 	
 	// dirty fix, increment module refcount to prevent module unload (such as done by rmmod)
 	// while buffer is enabled.
@@ -736,7 +751,7 @@ unsigned long phy_addr;
 
 int ad7606_reset(struct ad7606_state *st)
 {
-	dev_warn(st->dev,"ad7606_reset called!");
+	dev_dbg(st->dev,"ad7606_reset called!");
 
 	if (st->gpio_reset) {
 		GPIOSET(st->gpio_reset, 1);
@@ -864,6 +879,8 @@ static int ad7606_par16_read_block(struct device *dev,
 	//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
 	
 	//ndelay(delay_ns);
+	sample_count++;
+	warn_period++;
 
 	preempt_disable();
 	bool first_channel = true;
@@ -878,7 +895,6 @@ static int ad7606_par16_read_block(struct device *dev,
 
 		if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
 		{
-			first_channel = false; 
 
 			//insb((unsigned long)st->base_address, _buf, 2);
 
@@ -898,14 +914,24 @@ static int ad7606_par16_read_block(struct device *dev,
 		else
 		{
 
+			io_err_count++;
+			
 			//if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
 			//{
 				// DEBUG FRSTDATA INSTABILITY values disagree, retry.
 			//	first_channel = false;
 			//	continue;
 			//}
-			dev_warn(dev,"ad7606:channel read. IO error, frstdata level not expected at num=%u\n",num);
-			
+			dev_dbg(dev,"ad7606:channel read. IO error, frstdata level not expected at num=%u\n",num);
+			if(warn_period > st->samplerate[0])
+			{
+				u64 remainder_err_pct;
+				u64 err_pct = div64_u64(10000*io_err_count, sample_count); 
+				u64 err_pct_int = div64_u64_rem(err_pct, 100, &remainder_err_pct); 
+				
+				dev_warn(dev,"ad7606:channel read. error rate pct=%llu.%02llu\n",err_pct_int,remainder_err_pct);
+				warn_period = 0;
+			}
 			//GPIOSET(st->gpio_cs,1); // putting back cs to active high due to IO error
 			//GPIOSET(st->gpio_rd,1); // putting back rd to active high due to IO error
 			GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
@@ -924,7 +950,10 @@ static int ad7606_par16_read_block(struct device *dev,
 		}
 		//GPIOSET(st->gpio_rd,1); // rd strobe, read next channel
 		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
-		ndelay(delay_ns);	
+		//first_channel ? ndelay(4*delay_ns) : ndelay(delay_ns);
+		ndelay(delay_ns);
+		first_channel = false; 
+	
 		
 
 	}
