@@ -20,7 +20,8 @@
  *
  */
 //#define DEBUG
-#define TIMINGDELAY 100
+#define TIMINGDELAY 100 // ns
+#define IRQTIMEOUTMS 1000 // ms
 
 #include <linux/types.h>
 #include <linux/property.h>
@@ -87,6 +88,9 @@ static long cs_rd_values_one[1];
 static u64 sample_count;
 static u32 warn_period;
 static u64 io_err_count;
+static u64 irq_timeout_count;
+static u64 irq_cumulative_wait_jiffies;
+
 
 
 // x = pin_desc or desc array
@@ -278,7 +282,7 @@ static int ad7606_request_gpios(struct ad7606_state *st)
 	
 
 	st->gpio_convst = devm_gpiod_get(dev, "adi,conversion-start",
-					 GPIOD_OUT_LOW);
+					 GPIOD_OUT_HIGH);
 	if (IS_ERR(st->gpio_convst))
 		return PTR_ERR(st->gpio_convst);
 	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_convst set\n");
@@ -330,7 +334,7 @@ static int ad7606_request_gpios(struct ad7606_state *st)
 
 	st->gpio_cs_rd = devm_gpiod_get_array(dev,
 		"cs-rd",
-		GPIOD_OUT_LOW);
+		GPIOD_OUT_HIGH);
 	if(IS_ERR(st->gpio_cs_rd))
 		return PTR_ERR(st->gpio_cs_rd);
 	dev_dbg(dev,"ad7606:ad7606_request_gpios():gpio_cs_rd set\n");
@@ -441,6 +445,8 @@ static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 	sample_count = 0;
 	warn_period = 0;
 	io_err_count = 0;
+	irq_timeout_count = 0;
+	irq_cumulative_wait_jiffies = 0;
 	
 	// dirty fix, increment module refcount to prevent module unload (such as done by rmmod)
 	// while buffer is enabled.
@@ -501,14 +507,16 @@ static int ad7606_scan_direct(struct iio_dev *indio_dev, unsigned int ch)
 {
 	struct ad7606_state *st = iio_priv(indio_dev);
 	int ret;
+	
 
 	GPIOSET(st->gpio_convst, 1);
 	ret = wait_for_completion_timeout(&st->completion,
-					  msecs_to_jiffies(1000));
+					  msecs_to_jiffies(IRQTIMEOUTMS));
 	if (!ret) {
 		ret = -ETIMEDOUT;
 		goto error_ret;
 	}
+	
 
 	ret = ad7606_read_samples(st);
 	if (ret == 0)
@@ -789,14 +797,18 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 	// TEST external trigger : initiate a conversion by strobing convst
 	GPIOSET(st->gpio_convst, 0);
 	ndelay(TIMINGDELAY);
+	reinit_completion(&st->completion);
 	GPIOSET(st->gpio_convst, 1);
 	// now wait for IRQ to fire, signaling BUSY falling edge, and end of conversion. the irq handler will set completion
 	ret = wait_for_completion_timeout(&st->completion,
-		msecs_to_jiffies(1000));
+		msecs_to_jiffies(IRQTIMEOUTMS));
 	if (!ret) {
 		ret = -ETIMEDOUT;
+		irq_timeout_count++;
 		goto error_ret;
 	}
+
+	irq_cumulative_wait_jiffies += (msecs_to_jiffies(IRQTIMEOUTMS) - ret); // FOR DEBUGGING PERF. 
 	// end TEST external trigger
 	// conversion has ended, read samples
 
@@ -923,15 +935,7 @@ static int ad7606_par16_read_block(struct device *dev,
 			//	continue;
 			//}
 			dev_dbg(dev,"ad7606:channel read. IO error, frstdata level not expected at num=%u\n",num);
-			if(warn_period > st->samplerate[0])
-			{
-				u64 remainder_err_pct;
-				u64 err_pct = div64_u64(10000*io_err_count, sample_count); 
-				u64 err_pct_int = div64_u64_rem(err_pct, 100, &remainder_err_pct); 
-				
-				dev_warn(dev,"ad7606:channel read. error rate pct=%llu.%02llu\n",err_pct_int,remainder_err_pct);
-				warn_period = 0;
-			}
+
 			//GPIOSET(st->gpio_cs,1); // putting back cs to active high due to IO error
 			//GPIOSET(st->gpio_rd,1); // putting back rd to active high due to IO error
 			GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
@@ -948,6 +952,28 @@ static int ad7606_par16_read_block(struct device *dev,
 			return -EIO;
 
 		}
+
+		if(warn_period >= st->samplerate[0])
+		{
+			u64 remainder_err_pct;
+			//u64 remainder_irq_timeout_pct;
+			
+			u64 err_pct = div64_u64(10000*io_err_count, warn_period); 
+			u64 err_pct_int = div64_u64_rem(err_pct, 100, &remainder_err_pct); 
+			
+			//u64 irq_timeout_pct = div64_u64(10000*irq_timeout_count, warn_period); 
+			//u64 irq_timeout_pct_int = div64_u64_rem(irq_timeout_pct, 100, &remainder_irq_timeout_pct); 
+			
+
+			//dev_warn(dev,"ad7606:channel read. error rate / irq timeout pct=%llu.%02llu %llu.%02llu\n",err_pct_int,remainder_err_pct,irq_timeout_pct_int,remainder_irq_timeout_pct);
+			dev_warn(dev,"ad7606:channel read. error rate pct / irq timeout count / irq cumulative wait in msecs =%llu.%02llu %llu %llu\n",err_pct_int,remainder_err_pct,irq_timeout_count,irq_cumulative_wait_jiffies);
+
+
+			warn_period = 0;
+			io_err_count = 0;
+
+		}
+
 		//GPIOSET(st->gpio_rd,1); // rd strobe, read next channel
 		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
 		//first_channel ? ndelay(4*delay_ns) : ndelay(delay_ns);
