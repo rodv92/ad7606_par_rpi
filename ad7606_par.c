@@ -80,6 +80,8 @@
 
 #define GPIOSET(x,y) gpiod_set_raw_value(x, y)
 #define GPIOSETARR(w,x,y,z) gpiod_set_raw_array_value(w, x, y, z)
+#define MMIOCSRD(x) x ? iowrite32(csrdbits,st->base_address_set) : iowrite32(csrdbits,st->base_address_clr);
+#define MMIOCONVST(x) x ? iowrite32(convstbit,st->base_address_set) : iowrite32(convstbit,st->base_address_clr)
 
 
 static long cs_rd_values_zero[1];
@@ -91,7 +93,23 @@ static u64 io_err_count;
 static u64 irq_timeout_count;
 static u64 irq_cumulative_wait_jiffies;
 
+static u32 csrdbits;
+static u32 convstbit;
 
+
+
+inline static struct timespec64 normalize_timespec(long tv_sec, long tv_nsec) {
+    long const billion = 1000000000;
+    struct timespec64 t;
+    t.tv_sec = (tv_nsec >= 0 ? tv_nsec : tv_nsec - (billion-1)) / billion;
+    t.tv_nsec = tv_nsec - t.tv_sec * billion;
+    t.tv_sec += tv_sec;
+    return t;
+}
+
+inline static struct timespec64 timespec_subtract(const struct timespec64* time1, const struct timespec64* time0) {
+    return normalize_timespec(time1->tv_sec - time0->tv_sec, time1->tv_nsec - time0->tv_nsec);
+}
 
 // x = pin_desc or desc array
 // y = value
@@ -348,6 +366,8 @@ static int ad7606_request_gpios(struct ad7606_state *st)
 	bitmap_zero(cs_rd_values_one,2);
 	cs_rd_values_one[0] = GENMASK(1, 0);
 	dev_dbg(dev,"ad7606:ad7606_request_gpios():cs_rd bitmaps set\n");
+	csrdbits = (1 << desc_to_gpio(st->gpio_cs)) | (1 << desc_to_gpio(st->gpio_rd));
+	convstbit = (1 << desc_to_gpio(st->gpio_convst));
 
 
 	st->gpio_parallel_data = devm_gpiod_get_array(dev,
@@ -425,7 +445,7 @@ static int ad7606_validate_trigger(struct iio_dev *indio_dev,
 		pr_debug("ad7606:setting trigger to state:%u\n",ret);
 		struct iio_hrtimer_info *info = iio_trigger_get_drvdata(trig);
 		// get integer part of Hz sampling freq
-		// TODO : use sysfs instead
+		// TODO : use sysfs instead of poking inside iio hrtimer private state.
 		st->samplerate[0] = info->sampling_frequency[0];
 		st->samplerate[1] = info->sampling_frequency[1];
 		pr_info("ad7606:validating trigger, sample rate=%u\n",st->samplerate[0]);
@@ -468,7 +488,11 @@ static int ad7606_buffer_postenable(struct iio_dev *indio_dev)
 		return -EINVAL;
 	}
 
-	GPIOSET(st->gpio_convst, 1);
+	//GPIOSET(st->gpio_convst, 1);
+	dev_info(st->dev, "buffer enabled.\n");
+	MMIOCONVST(1);
+	dev_info(st->dev, "convst set to 1.\n");
+	
 	ndelay(TIMINGDELAY);
 
 	return 0;
@@ -481,7 +505,9 @@ static int ad7606_buffer_predisable(struct iio_dev *indio_dev)
 	
 	
 	kfree(st->data_scan_elements);
-	GPIOSET(st->gpio_convst, 0);
+	//GPIOSET(st->gpio_convst, 0);
+	MMIOCONVST(0);
+
 	ndelay(TIMINGDELAY);
 	st->buffer_enabled = false;
 	//dirty fix : decrement module refcount to allow unloading, since the buffer is disabled
@@ -509,7 +535,8 @@ static int ad7606_scan_direct(struct iio_dev *indio_dev, unsigned int ch)
 	int ret;
 	
 
-	GPIOSET(st->gpio_convst, 1);
+	//GPIOSET(st->gpio_convst, 1);
+	MMIOCONVST(1);
 	ret = wait_for_completion_timeout(&st->completion,
 					  msecs_to_jiffies(IRQTIMEOUTMS));
 	if (!ret) {
@@ -523,7 +550,8 @@ static int ad7606_scan_direct(struct iio_dev *indio_dev, unsigned int ch)
 		ret = st->data[ch];
 
 error_ret:
-	GPIOSET(st->gpio_convst, 0);
+	//GPIOSET(st->gpio_convst, 0);
+	MMIOCONVST(0);
 
 	return ret;
 }
@@ -784,22 +812,32 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 	struct ad7606_state *st = iio_priv(indio_dev);
 	int ret;
 
-	//struct timespec64 ts1;
-	//struct timespec64 ts2;
+	struct timespec64 ts1;
+	struct timespec64 ts2;
 	
-	//ktime_get_ts64(&ts1);
 	
+	ktime_get_ts64(&ts1);
 
 	//dev_info(st->dev,"enter ad7606_trigger_handler\n");
 
 	guard(mutex)(&st->lock);
 
 	// TEST external trigger : initiate a conversion by strobing convst
-	GPIOSET(st->gpio_convst, 0);
+	
+	//GPIOSET(st->gpio_convst, 0);
+	//preempt_disable();
+	MMIOCONVST(0);
+
 	ndelay(TIMINGDELAY);
 	reinit_completion(&st->completion);
-	GPIOSET(st->gpio_convst, 1);
+	
+	//GPIOSET(st->gpio_convst, 1);
+	MMIOCONVST(1);
+	//usleep_range(5,10);
+	s64 iiots = iio_get_time_ns(indio_dev);
+
 	// now wait for IRQ to fire, signaling BUSY falling edge, and end of conversion. the irq handler will set completion
+	
 	ret = wait_for_completion_timeout(&st->completion,
 		msecs_to_jiffies(IRQTIMEOUTMS));
 	if (!ret) {
@@ -807,10 +845,26 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 		irq_timeout_count++;
 		goto error_ret;
 	}
+	
+	//ret = try_wait_for_completion(&st->completion);
+	//dev_info(st->dev,"wait for completion exit\n");
 
-	irq_cumulative_wait_jiffies += (msecs_to_jiffies(IRQTIMEOUTMS) - ret); // FOR DEBUGGING PERF. 
+
+	//preempt_enable();
+
+	if (!ret) {
+		//dev_info(st->dev,"wait for completion timeout !\n");
+
+		ret = -ETIMEDOUT;
+		irq_timeout_count++;
+		goto error_ret;
+	}
+	
+	//irq_cumulative_wait_jiffies += (msecs_to_jiffies(IRQTIMEOUTMS) - ret); // FOR DEBUGGING PERF. 
+	
 	// end TEST external trigger
 	// conversion has ended, read samples
+
 
 	ret = ad7606_read_samples(st);
 	if (ret)
@@ -824,16 +878,19 @@ static irqreturn_t ad7606_trigger_handler(int irq, void *p)
 	}
 
 	iio_push_to_buffers_with_timestamp(indio_dev, st->data_scan_elements,
-					   iio_get_time_ns(indio_dev));
+					   iiots);
 
 
 	//	iio_push_to_buffers_with_timestamp(indio_dev, st->data,
 	//					   iio_get_time_ns(indio_dev));
 	// TODO : use pointer to store iio_get_time_ns() timestamp closer to the end of conversion process
 	
-	//ktime_get_ts64(&ts2);
+	ktime_get_ts64(&ts2);
 
-	//dev_info(st->dev,"ad7606_trigger_handler exec start:[%5lld.%06ld]\n",(s64) ts1.tv_sec,ts1.tv_nsec/1000);
+	struct timespec64 ts3 = timespec_subtract(&ts2,&ts1);
+
+	
+	dev_info(st->dev,"ad7606_trigger_handler exec duration:[%5lld.%06ld]\n",(s64) ts3.tv_sec,ts3.tv_nsec/1000);
 	//dev_info(st->dev,"ad7606_trigger_handler exec stop:[%5lld.%06ld]\n",(s64) ts2.tv_sec,ts2.tv_nsec/1000);
 	
 
@@ -886,11 +943,7 @@ static int ad7606_par16_read_block(struct device *dev,
 		// https://stackoverflow.com/questions/15994603/how-to-sleep-in-the-linux-kernel
 		// TODO : check the timing behaviour of that call, or use MMIO to set value directly
 	
-	//ndelay(delay_ns);
-	//GPIOSET(st->gpio_rd,0); // rd set to low, read first channel
-	//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
-	
-	//ndelay(delay_ns);
+
 	sample_count++;
 	warn_period++;
 
@@ -900,19 +953,20 @@ static int ad7606_par16_read_block(struct device *dev,
 	while(num>0)
 	{
 
-		//GPIOSET(st->gpio_rd,0);
-		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
+		//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
+		MMIOCSRD(0);
+
 		ndelay(delay_ns);
 		
 
 		if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
 		{
 
-			//insb((unsigned long)st->base_address, _buf, 2);
+			//insb((unsigned long)st->base_address_get, _buf, 2);
 
-			val = ioread32(st->base_address);
+			val = ioread32(st->base_address_get);
 			dev_dbg(dev,"ad7606:channel read. num=%u\n",num);
-			dev_dbg(dev,"ad7606:channel read. raw base_address val=%u\n",val);
+			dev_dbg(dev,"ad7606:channel read. raw base_address_get val=%u\n",val);
 			
 
 			*_buf = (s16) ((val >> 8) & 0xFFFF); // extract 16 bits
@@ -936,10 +990,9 @@ static int ad7606_par16_read_block(struct device *dev,
 			//}
 			dev_dbg(dev,"ad7606:channel read. IO error, frstdata level not expected at num=%u\n",num);
 
-			//GPIOSET(st->gpio_cs,1); // putting back cs to active high due to IO error
-			//GPIOSET(st->gpio_rd,1); // putting back rd to active high due to IO error
-			GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
-	
+			//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+			MMIOCSRD(1);
+
 
 			// TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);		
@@ -974,8 +1027,9 @@ static int ad7606_par16_read_block(struct device *dev,
 
 		}
 
-		//GPIOSET(st->gpio_rd,1); // rd strobe, read next channel
-		GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+		//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+		MMIOCSRD(1);
+
 		//first_channel ? ndelay(4*delay_ns) : ndelay(delay_ns);
 		ndelay(delay_ns);
 		first_channel = false; 
@@ -983,9 +1037,7 @@ static int ad7606_par16_read_block(struct device *dev,
 		
 
 	}
-	//GPIOSET(st->gpio_cs,1); // data read end, putting back cs to active high
-	//GPIOSET(st->gpio_rd,1); // data read end, putting back rd to active high
-	//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_one);
+
 	
 	// TODO : check that line propery is default (active high) in gpio setup
 	ndelay(delay_ns);
@@ -995,7 +1047,7 @@ static int ad7606_par16_read_block(struct device *dev,
 
 /*
 	if (st->gpio_frstdata) {
-		insw((unsigned long)st->base_address, _buf, 1);
+		insw((unsigned long)st->base_address_get, _buf, 1);
 		if (!gpiod_get_value(st->gpio_frstdata)) {
 			ad7606_reset(st);
 			return -EIO;
@@ -1003,7 +1055,7 @@ static int ad7606_par16_read_block(struct device *dev,
 		_buf++;
 		num--;
 	}
-	insw((unsigned long)st->base_address, _buf, num);
+	insw((unsigned long)st->base_address_get, _buf, num);
 	return 0;
 */
 
@@ -1041,14 +1093,14 @@ static int ad7606_par8_read_block(struct device *dev,
 	 *
 	 */
 
-	GPIOSET(st->gpio_cs,0); // TODO : check that line propery is default (active high) in gpio setup
-		// add proper timing constraints. test : sleep based and delay functions
-		// https://stackoverflow.com/questions/15994603/how-to-sleep-in-the-linux-kernel
+	GPIOSET(st->gpio_cs,0);
+	//GPIOSETARR(st->gpio_cs_rd->ndescs,st->gpio_cs_rd->desc,st->gpio_cs_rd->info,cs_rd_values_zero);
 	
 	ndelay(delay_ns);
 
 
 	GPIOSET(st->gpio_rd,0);
+	
 	
 	// strobe cycle 0.4us, total read time for all channels = 0.4us * 2 * 8 reads, 12.8us, which gives max sampling rate of 156.250 ksps per channel
 	// not accounting preamble delays (convst signal )
@@ -1071,16 +1123,16 @@ static int ad7606_par8_read_block(struct device *dev,
 		if ((bool) gpiod_get_value(st->gpio_frstdata) == first_channel)
 		{
 			 
-			//insb((unsigned long)st->base_address, _buf, 2);
+			//insb((unsigned long)st->base_address_get, _buf, 2);
 
-			val = readl(st->base_address);
+			val = readl(st->base_address_get);
 			lsb = (val >> 8) & 0xFF; // extract 8 bits (lsb)
 			GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
 			GPIOSET(st->gpio_rd,0); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
 
-			val = readl(st->base_address);
+			val = readl(st->base_address_get);
 			msb = (val >> 8) & 0xFF; // extract 8 bits (msb)
 			GPIOSET(st->gpio_rd,1); // TODO : check that line propery is default (active high) in gpio setup
 			ndelay(delay_ns);
@@ -1149,7 +1201,7 @@ dev_set_drvdata(dev, indio_dev);
 st->dev = dev;
 mutex_init(&st->lock);
 st->bops = bops;
-st->base_address = base_address;
+st->base_address_get = base_address;
 // tied to logic low, analog input range is +/- 5V 
 st->range[0] = 0;
 st->oversampling = 1;
@@ -1367,16 +1419,10 @@ int ad7606_probe(struct platform_device *pdev)
 		return PTR_ERR(addr);
 
 	dev_dbg(&pdev->dev,"ioremap() ok, ptr base is = %px\n",addr);
-	
-	u32 offset = 13;
-	u32 __iomem * offset_addr = (u32 __iomem *) addr + offset;
-	
 
 	//unsigned long remapped_addr = *((unsigned long *) addr);
 	dev_dbg(&pdev->dev,"ioremap() ok, ptr base for GPIO is = %px\n",addr);
 	
-	dev_dbg(&pdev->dev,"ioremap() ok, ptr base for GPIO get level is = %px\n",offset_addr);
-	//dev_dbg(&pdev->dev,"ioremap() ok, addr is = %lu\n",remapped_addr);
 
 	/*
 	if(!remapped_addr)
@@ -1409,7 +1455,24 @@ int ad7606_probe(struct platform_device *pdev)
 	st->dev = &pdev->dev;
 	mutex_init(&st->lock);
 	st->bops = &ad7606_par16_bops;
-	st->base_address = offset_addr;
+
+
+	u32 offset = 13;
+	st->base_address_get = (u32 __iomem *) addr + offset;
+
+	dev_dbg(&pdev->dev,"ioremap() ok, ptr base for GPIO get level is = %px\n",st->base_address_get);
+	//dev_dbg(&pdev->dev,"ioremap() ok, addr is = %lu\n",remapped_addr);
+	
+	offset = 7;
+	st->base_address_set = (volatile u32 __iomem *) addr + offset;
+	dev_dbg(&pdev->dev,"ioremap() ok, ptr base for GPIO set level is = %px\n",st->base_address_set);
+	
+	
+	offset = 10;
+	st->base_address_clr = (volatile u32 __iomem *) addr + offset;
+	dev_dbg(&pdev->dev,"ioremap() ok, ptr base for GPIO clr level is = %px\n",st->base_address_clr);
+	
+	
 	/* tied to logic low, analog input range is +/- 5V */
 	st->range[0] = 0;
 	st->oversampling = 1;
@@ -1547,6 +1610,7 @@ int ad7606_probe(struct platform_device *pdev)
 
 	
 	#if DEBUG
+	/*
 	for(u16 i = 0;i<256;i++)
 	{ 
 		u32 testval = readl(addr);
@@ -1554,6 +1618,7 @@ int ad7606_probe(struct platform_device *pdev)
 		dev_dbg(&pdev->dev,"readl() on GPIO memory map test : val = %u\n",testval);
 		addr = (u32 __iomem *) addr + 1;
 	}
+	*/
 	#endif
 
 	return devm_iio_device_register(&pdev->dev, indio_dev);

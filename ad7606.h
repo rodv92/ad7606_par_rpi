@@ -117,7 +117,9 @@ struct ad7606_state {
 	const struct ad7606_bus_ops	*bops;
 	unsigned int			range[16];
 	unsigned int			oversampling;
-	void __iomem			*base_address;
+	void __iomem			*base_address_get;
+	volatile void __iomem			*base_address_set;
+	volatile void __iomem			*base_address_clr;
 	bool				sw_mode_en;
 	bool				buffer_enabled;
 	const unsigned int		*scale_avail;
